@@ -1,0 +1,39 @@
+[workspace]
+members = ["fuzz"]
+
+[package]
+name = "brie-tree"
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/Amanieu/brie-tree"
+description = "A fast B+ Tree implementation that uses integer keys"
+license = "Apache-2.0 OR MIT"
+keywords = ["btree", "no_std"]
+categories = ["data-structures", "no-std"]
+rust-version = "1.88"
+
+[dependencies]
+allocator-api2 = { version = "0.3.0", default-features = false, features = ["alloc"] }
+nonmax = { version = "0.5.5", default-features = false }
+cfg-if = "1.0.0"
+
+# For benchmarking internal functions.
+divan = { version = "0.1.21", optional = true }
+
+[dev-dependencies]
+rand = "0.9.0"
+divan = "0.1.21"
+
+[features]
+# Exposes internal benchmarks to cargo bench
+internal_benches = ["dep:divan"]
+
+[[bench]]
+name = "btree"
+harness = false
+
+# Build optimized binaries with debug info for use by profiling tools.
+[profile.release]
+debug = 1
+[profile.bench]
+debug = 1

@@ -1,0 +1,86 @@
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Only beta for now since MSRV is 1.88
+        channel: [beta, nightly]
+        target:
+          - tuple: i586-unknown-linux-gnu
+          - tuple: x86_64-unknown-linux-gnu
+          - tuple: x86_64-unknown-linux-gnu
+            rustflags: -Ctarget-feature=+sse4.2
+          - tuple: x86_64-unknown-linux-gnu
+            rustflags: -Ctarget-feature=+sse4.2,+popcnt
+          - tuple: x86_64-unknown-linux-gnu
+            rustflags: -Ctarget-feature=+avx2,+popcnt
+          - tuple: x86_64-unknown-linux-gnu
+            rustflags: -Ctarget-feature=+avx512bw,+popcnt
+          - tuple: aarch64-unknown-linux-gnu
+          - tuple: aarch64-unknown-linux-gnu
+            rustflags: -Ctarget-feature=+sve
+          - tuple: riscv64gc-unknown-linux-gnu
+          - tuple: riscv64gc-unknown-linux-gnu
+            rustflags: -Ctarget-feature=+v
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ matrix.channel }}
+        targets: ${{ matrix.target.tuple }}
+    - name: Install cargo-fuzz
+      run: cargo install cargo-fuzz
+    - name: Install Intel SDE
+      if: ${{ matrix.target.tuple }} == x86_64-unknown-linux-gnu
+      uses: petarpetrovt/setup-sde@v2.4
+    - name: Set up Intel SDE as runner
+      if: ${{ matrix.target.tuple }} == x86_64-unknown-linux-gnu
+      run: echo CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="${SDE_PATH}/sde64 -spr --" >> $GITHUB_ENV
+    - name: Setup toolchains for cross compilation and cross testing for Rust
+      if: ${{ matrix.target.tuple }} != x86_64-unknown-linux-gnu
+      uses: taiki-e/setup-cross-toolchain-action@v1.29.1
+      with:
+        target: ${{ matrix.target.tuple }}
+    - name: Test
+      run: cargo test --features internal_benches
+      env:
+        RUSTFLAGS: -D warnings ${{ matrix.target.rustflags }}
+    - name: Run fuzz target for 60s
+      run: cargo fuzz run btree -s none -- -max_total_time=60
+      env:
+        RUSTFLAGS: -D warnings ${{ matrix.target.rustflags }}
+
+  tools:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+    env:
+      RUSTFLAGS: -D warnings
+      RUSTDOCFLAGS: -D warnings
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@nightly
+      with:
+        components: clippy,rustfmt
+        targets: thumbv6m-none-eabi
+    - name: Rustfmt
+      run: cargo fmt --all -- --check
+    - name: Clippy lints
+      run: cargo clippy --all
+    - name: Docs
+      run: cargo doc
+    # Disabled until 1.88 comes out of beta
+    #- name: MSRV
+    #  run: cargo install cargo-msrv && cargo msrv --workspace verify
+    - name: Check no_std support
+      run: cargo check --target thumbv6m-none-eabi

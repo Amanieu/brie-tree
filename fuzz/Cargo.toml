@@ -1,0 +1,21 @@
+[package]
+name = "brie-tree-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1.4.1", features = ["derive"] }
+libfuzzer-sys = "0.4"
+
+[dependencies.brie-tree]
+path = ".."
+
+[[bin]]
+name = "btree"
+path = "fuzz_targets/btree.rs"
+test = false
+doc = false
