@@ -605,6 +605,10 @@ pub(crate) struct NodePool<I: BTreeInteger, V> {
     marker: PhantomData<(I, V)>,
 }
 
+// These impls are needed because `NonNull` supresses the automatic impls.
+unsafe impl<I: BTreeInteger + Send, V: Send> Send for NodePool<I, V> {}
+unsafe impl<I: BTreeInteger + Sync, V: Sync> Sync for NodePool<I, V> {}
+
 impl<I: BTreeInteger, V> NodePool<I, V> {
     #[inline]
     pub(crate) fn new() -> Self {
