@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/Amanieu/brie-tree/compare/brie-tree-v0.1.0...brie-tree-v0.1.1) - 2025-07-12
+
+### Other
+
+- Implement `Send` and `Sync` for `NodePool`
+
 ## [0.1.0](https://github.com/Amanieu/brie-tree/releases/tag/brie-tree-v0.1.0) - 2025-06-13
 
 ### Other
