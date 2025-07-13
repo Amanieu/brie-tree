@@ -225,3 +225,22 @@ fn iter() {
     assert_eq!(input, keys);
     assert_eq!(input, values);
 }
+
+#[allow(dead_code)]
+fn require_send<T: Send>() {}
+#[allow(dead_code)]
+fn require_sync<T: Sync>() {}
+#[allow(dead_code)]
+fn require_unpin<T: Unpin>() {}
+#[allow(dead_code)]
+fn check_send<K: Send + BTreeKey, V: Send>() {
+    require_send::<BTree<K, V>>();
+}
+#[allow(dead_code)]
+fn check_sync<K: Sync + BTreeKey, V: Sync>() {
+    require_sync::<BTree<K, V>>();
+}
+#[allow(dead_code)]
+fn check_unpin<K: Unpin + BTreeKey, V: Unpin>() {
+    require_unpin::<BTree<K, V>>();
+}

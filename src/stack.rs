@@ -46,7 +46,7 @@ pub(crate) const fn max_height<I: BTreeInteger>() -> usize {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Height<I: BTreeInteger> {
     height: usize,
-    marker: PhantomData<*mut I>,
+    marker: PhantomData<fn() -> I>,
 }
 
 impl<I: BTreeInteger> Height<I> {

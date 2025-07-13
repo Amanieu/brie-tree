@@ -66,7 +66,7 @@ pub(crate) const MAX_POOL_SIZE: usize = i32::MAX as usize;
 pub(crate) struct NodePos<I: BTreeInteger> {
     // Using a u32 internally so each stack entry in a cursor is 8 bytes.
     pos: u32,
-    marker: PhantomData<*mut I>,
+    marker: PhantomData<fn() -> I>,
 }
 
 /// Helper macro to create a `NodePos` at a constant index.

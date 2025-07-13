@@ -32,7 +32,9 @@ pub(crate) struct AlignedKeys<T>(pub(crate) T);
 /// # Safety
 ///
 /// All items must be implemented as documented.
-pub(crate) unsafe trait BTreeInteger: Copy + Eq + Debug {
+pub(crate) unsafe trait BTreeInteger:
+    Copy + Eq + Debug + Send + Sync + Unpin
+{
     /// Number of elements per node, which must be at least 4.
     ///
     /// The number of elements may vary depending on the integer size to fit in
