@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/Amanieu/brie-tree/compare/brie-tree-v0.1.1...brie-tree-v0.1.2) - 2025-07-13
+
+### Other
+
+- Test MSRV now that 1.88 is stable
+- Fix clippy lints
+- Avoid `PhantomData` that inhibit `Send` and `Sync`
+
 ## [0.1.1](https://github.com/Amanieu/brie-tree/compare/brie-tree-v0.1.0...brie-tree-v0.1.1) - 2025-07-12
 
 ### Other
