@@ -203,7 +203,7 @@ pub(crate) trait SimdSearch: Int {
 unsafe fn exact_div_unchecked(a: usize, b: usize) -> usize {
     unsafe {
         // This hint allows LLVM to remove unnecessary bit shifts.
-        hint::assert_unchecked(a % b == 0);
+        hint::assert_unchecked(a.is_multiple_of(b));
         a / core::num::NonZero::new_unchecked(b)
     }
 }

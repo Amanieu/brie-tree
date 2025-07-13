@@ -542,7 +542,7 @@ pub(crate) const fn node_layout<I: BTreeInteger, V>() -> (Layout, usize, usize) 
     // We require nodes to have at least 4 elements, and the number of elements
     // must be a multiple of 2.
     const { assert!(I::B >= 4) };
-    const { assert!(I::B % 2 == 0) };
+    const { assert!(I::B.is_multiple_of(2)) };
 
     // The node layout is effectively:
     // struct Node<I, V> {
