@@ -13,8 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Only beta for now since MSRV is 1.88
-        channel: [beta, nightly]
+        channel: [1.88, nightly]
         target:
           - tuple: i586-unknown-linux-gnu
           - tuple: x86_64-unknown-linux-gnu
@@ -79,8 +78,7 @@ jobs:
       run: cargo clippy --all
     - name: Docs
       run: cargo doc
-    # Disabled until 1.88 comes out of beta
-    #- name: MSRV
-    #  run: cargo install cargo-msrv && cargo msrv --workspace verify
+    - name: MSRV
+      run: cargo install cargo-msrv && cargo msrv --workspace verify
     - name: Check no_std support
       run: cargo check --target thumbv6m-none-eabi
