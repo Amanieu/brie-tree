@@ -1,3 +1,5 @@
+use core::ops::Bound;
+
 use allocator_api2::alloc::Allocator;
 use rand::{Rng, seq::SliceRandom};
 
@@ -144,11 +146,23 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
 
 type Key = nonmax::NonMaxU32;
 
+fn key(i: u32) -> Key {
+    Key::new(i).unwrap()
+}
+
+fn assert_keys_values(btree: &BTree<Key, Key>, expected: &[u32]) {
+    let expected: Vec<_> = expected.iter().copied().map(key).collect();
+    let keys: Vec<_> = btree.keys().collect();
+    let values: Vec<_> = btree.values().copied().collect();
+    assert_eq!(expected, keys);
+    assert_eq!(expected, values);
+}
+
 #[test]
 fn insert_sorted() {
     let mut btree = BTree::new();
     btree.check_invariants(true);
-    let input: Vec<_> = (0..1000).map(|i| Key::new(i).unwrap()).collect();
+    let input: Vec<_> = (0..1000).map(key).collect();
     for &i in &input {
         btree.insert(i, i);
         btree.check_invariants(true);
@@ -163,7 +177,7 @@ fn insert_sorted() {
 fn insert_random() {
     let mut btree = BTree::new();
     btree.check_invariants(true);
-    let input: Vec<_> = (0..1000).map(|i| Key::new(i).unwrap()).collect();
+    let input: Vec<_> = (0..1000).map(key).collect();
     let mut shuffled = input.clone();
     shuffled.shuffle(&mut rand::rng());
     for &i in &shuffled {
@@ -177,9 +191,57 @@ fn insert_random() {
 }
 
 #[test]
+fn insert_before_preserves_cursor_position() {
+    let mut btree = BTree::new();
+    for i in [0, 10, 20] {
+        btree.insert(key(i), key(i));
+    }
+
+    let mut cursor = btree.cursor_mut_at(Bound::Included(key(10)));
+    cursor.insert_before(key(5), key(5));
+    assert_eq!(cursor.entry().map(|(k, _v)| k), Some(key(10)));
+    drop(cursor);
+
+    let mut cursor = btree.cursor_mut_at(Bound::Unbounded);
+    cursor.insert_before(key(30), key(30));
+    assert_eq!(cursor.entry().map(|(k, _v)| k), None);
+    drop(cursor);
+
+    btree.check_invariants(true);
+    assert_keys_values(&btree, &[0, 5, 10, 20, 30]);
+}
+
+#[test]
+fn insert_before_preserves_cursor_position_after_split() {
+    let mut btree = BTree::new();
+    let node_len = <Key as BTreeKey>::Int::B - 1;
+    for i in 0..node_len as u32 {
+        btree.insert(key(i * 2), key(i * 2));
+    }
+
+    let successor_index = node_len as u32 / 2;
+    let successor = key(successor_index * 2);
+    let mut cursor = btree.cursor_mut_at(Bound::Included(successor));
+    cursor.insert_before(key(successor_index * 2 - 1), key(successor_index * 2 - 1));
+    assert_eq!(cursor.entry().map(|(k, _v)| k), Some(successor));
+    drop(cursor);
+
+    let mut cursor = btree.cursor_mut_at(Bound::Unbounded);
+    cursor.insert_before(key(node_len as u32 * 2), key(node_len as u32 * 2));
+    assert_eq!(cursor.entry().map(|(k, _v)| k), None);
+    drop(cursor);
+
+    btree.check_invariants(true);
+    let mut expected: Vec<_> = (0..node_len as u32).map(|i| i * 2).collect();
+    expected.insert(successor_index as usize, successor_index * 2 - 1);
+    expected.push(node_len as u32 * 2);
+    assert_keys_values(&btree, &expected);
+}
+
+#[test]
 fn remove() {
     let mut btree = BTree::new();
-    let mut input: Vec<_> = (0..1000).map(|i| Key::new(i).unwrap()).collect();
+    let mut input: Vec<_> = (0..1000).map(key).collect();
     let mut shuffled = input.clone();
     shuffled.shuffle(&mut rand::rng());
     for &i in &input {
@@ -213,7 +275,7 @@ fn remove() {
 #[test]
 fn iter() {
     let mut btree = BTree::new();
-    let input: Vec<_> = (0..1000).map(|i| Key::new(i).unwrap()).collect();
+    let input: Vec<_> = (0..1000).map(key).collect();
     let mut shuffled = input.clone();
     shuffled.shuffle(&mut rand::rng());
     for &i in &input {

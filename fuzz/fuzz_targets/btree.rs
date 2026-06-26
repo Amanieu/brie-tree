@@ -243,6 +243,7 @@ fn run<
                                 };
                                 cursor.insert_before(key, value);
                                 vec.insert(index, (key, value));
+                                index += 1;
                             }
                             CursorMutAction::InsertAfter(value) => {
                                 if index != vec.len() {

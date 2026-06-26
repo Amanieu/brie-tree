@@ -307,7 +307,8 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
 
     /// Common code for `insert_before` and `insert_after`.
     ///
-    /// After insertion the leaf position will be unchanged.
+    /// After insertion the cursor will point to the same logical element as
+    /// before the insertion.
     #[inline]
     fn insert<const AFTER: bool>(&mut self, key: K, value: V) {
         let key = int_from_key(key);
@@ -322,6 +323,7 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
         } else {
             pos
         };
+        let target_pos = if AFTER { pos.index() } else { pos.index() + 1 };
         let prev_key = unsafe { node.key(insert_pos, &self.btree.leaf) };
 
         // If we are inserting the last key in a node then we need to update
@@ -371,6 +373,7 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
             // Restore next_leaf which will have been overwritten by the insert.
             unsafe {
                 node.set_next_leaf(next_leaf, &mut self.btree.leaf);
+                self.stack[Height::leaf()].1 = NodePos::new_unchecked(target_pos);
             }
             return;
         }
@@ -396,10 +399,12 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
         // Keep track of where the cursor is in the tree by adjusting the
         // position on the stack if we were in the second half of the node that
         // got split.
-        let mut in_right_split = if let Some(new_pos) = pos.split_right_half() {
+        let mut in_right_split = if target_pos >= K::Int::B / 2 {
+            let new_pos = unsafe { NodePos::new_unchecked(target_pos - K::Int::B / 2) };
             self.stack[Height::leaf()] = (new_node, new_pos);
             true
         } else {
+            self.stack[Height::leaf()] = (node, unsafe { NodePos::new_unchecked(target_pos) });
             false
         };
 
@@ -1220,11 +1225,12 @@ impl<'a, K: BTreeKey, V, A: Allocator> CursorMut<'a, K, V, A> {
     /// Inserts `key` and `value` before the element that the cursor is
     /// currently pointing to.
     ///
-    /// After insertion the cursor will be pointing to the newly inserted
-    /// element.
+    /// After insertion the cursor will still be pointing to the same element as
+    /// before the insertion.
     ///
     /// If the cursor is pointing to the end of the tree then this inserts the
-    /// new element at the end of the tree after all other elements.
+    /// new element at the end of the tree after all other elements and the
+    /// cursor remains at the end.
     ///
     /// It is the user's responsibility to ensure that inserting `key` at this
     /// position does not violate the invariant that all keys must be in sorted
