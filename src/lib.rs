@@ -133,24 +133,36 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
     /// Clears the map, removing all elements.
     #[inline]
     pub fn clear(&mut self) {
+        struct ClearGuard<'a, K: BTreeKey, V, A: Allocator> {
+            btree: &'a mut BTree<K, V, A>,
+        }
+
+        impl<K: BTreeKey, V, A: Allocator> Drop for ClearGuard<'_, K, V, A> {
+            #[inline]
+            fn drop(&mut self) {
+                // Free all nodes without freeing the underlying allocations.
+                let root = self.btree.leaf.clear_and_alloc_node();
+                self.btree.internal.clear();
+
+                // Re-initialize the root node.
+                self.btree.height = Height::leaf();
+                self.btree.init_root(root);
+            }
+        }
+
+        // Ensure the tree is left empty even if dropping a value panics.
+        let guard = ClearGuard { btree: self };
+
         // Drop values. We don't need to modify the keys since we're about to
-        // free the nodes anyways.
+        // free the nodes afterwards.
         if mem::needs_drop::<V>() {
-            let mut iter = self.raw_iter();
-            while let Some((_key, value_ptr)) = unsafe { iter.next(&self.leaf) } {
+            let mut iter = guard.btree.raw_iter();
+            while let Some((_key, value_ptr)) = unsafe { iter.next(&guard.btree.leaf) } {
                 unsafe {
                     value_ptr.drop_in_place();
                 }
             }
         }
-
-        // Free all nodes without freeing the underlying allocations.
-        let root = self.leaf.clear_and_alloc_node();
-        self.internal.clear();
-
-        // Re-initialize the root node.
-        self.height = Height::leaf();
-        self.init_root(root);
     }
 
     /// Returns `true` if the map contains no elements.

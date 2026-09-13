@@ -1,4 +1,8 @@
 use core::ops::Bound;
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use allocator_api2::alloc::Allocator;
 use rand::{Rng, seq::SliceRandom};
@@ -305,4 +309,58 @@ fn check_sync<K: Sync + BTreeKey, V: Sync>() {
 #[allow(dead_code)]
 fn check_unpin<K: Unpin + BTreeKey, V: Unpin>() {
     require_unpin::<BTree<K, V>>();
+}
+
+#[test]
+fn clear_with_panicking_value() {
+    static DROPS: [AtomicUsize; 4] = [
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+    ];
+
+    struct DropValue {
+        index: usize,
+        panic: bool,
+    }
+
+    impl Drop for DropValue {
+        fn drop(&mut self) {
+            DROPS[self.index].fetch_add(1, Ordering::Relaxed);
+            assert!(!self.panic, "value destructor panicked");
+        }
+    }
+
+    for drops in &DROPS {
+        drops.store(0, Ordering::Relaxed);
+    }
+    let mut btree = BTree::new();
+    for (index, panic) in [(0, false), (1, true), (2, false)] {
+        btree.insert(key(index as u32), DropValue { index, panic });
+    }
+
+    let result = catch_unwind(AssertUnwindSafe(|| btree.clear()));
+    assert!(result.is_err());
+    assert!(btree.is_empty());
+    btree.check_invariants(true);
+    assert_eq!(
+        DROPS.each_ref().map(|drops| drops.load(Ordering::Relaxed)),
+        [1, 1, 0, 0]
+    );
+
+    // The restored root can be re-used without exposing or dropping any of the
+    // values which were discarded when clear unwound.
+    btree.insert(
+        key(3),
+        DropValue {
+            index: 3,
+            panic: false,
+        },
+    );
+    drop(btree);
+    assert_eq!(
+        DROPS.each_ref().map(|drops| drops.load(Ordering::Relaxed)),
+        [1, 1, 0, 1]
+    );
 }
