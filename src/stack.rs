@@ -41,8 +41,8 @@ pub(crate) const fn max_height<I: BTreeInteger>() -> usize {
 
 /// A height in the tree.
 ///
-/// This has the invariant of always being less than `max_height::<I>()`, which
-/// allows safe unchecked indexing in a stack.
+/// This has the invariant of being at most `max_height::<I>()`, which allows
+/// safe unchecked indexing in a stack.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Height<I: BTreeInteger> {
     height: usize,
@@ -96,11 +96,12 @@ impl<I: BTreeInteger> Height<I> {
 
 /// Stack which holds the path to a leaf node from the root of the tree.
 ///
-/// The is large enough to hold `max_height::<I>()`, which depends on the branching
-/// factor and the node size.
+/// This is large enough to hold `max_height::<I>() + 1` entries, which depends
+/// on the branching factor and the node size. The extra entry is for leaf
+/// height zero.
 ///
 /// The stack is indexed with `Height` which allows unchecked indexing since
-/// all heights must be less than `max_heigh::<I>()`.
+/// all heights must be at most `max_height::<I>()`.
 #[derive(Clone)]
 pub(crate) struct Stack<I: BTreeInteger, const H: usize> {
     entries: [(NodeRef, NodePos<I>); H],
@@ -122,7 +123,7 @@ impl<I: BTreeInteger, const H: usize> Index<Height<I>> for Stack<I, H> {
 
     #[inline]
     fn index(&self, index: Height<I>) -> &Self::Output {
-        const { assert!(H == max_height::<I>()) };
+        const { assert!(H == max_height::<I>() + 1) };
         unsafe { self.entries.get_unchecked(index.height) }
     }
 }
@@ -130,7 +131,7 @@ impl<I: BTreeInteger, const H: usize> Index<Height<I>> for Stack<I, H> {
 impl<I: BTreeInteger, const H: usize> IndexMut<Height<I>> for Stack<I, H> {
     #[inline]
     fn index_mut(&mut self, index: Height<I>) -> &mut Self::Output {
-        const { assert!(H == max_height::<I>()) };
+        const { assert!(H == max_height::<I>() + 1) };
         unsafe { self.entries.get_unchecked_mut(index.height) }
     }
 }

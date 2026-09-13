@@ -120,7 +120,7 @@ macro_rules! impl_int {
                     unsafe { NodePos::new_unchecked(Self::Raw::search(&keys.0, search)) }
                 }
 
-                type Stack = Stack<Self, { max_height::<Self>() }>;
+                type Stack = Stack<Self, { max_height::<Self>() + 1 }>;
             }
 
             impl BTreeKey for nonmax::$nonmax {
