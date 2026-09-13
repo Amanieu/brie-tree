@@ -739,18 +739,20 @@ impl<I: BTreeInteger, V> NodePool<I, V> {
     ///
     /// # Safety
     ///
-    /// This pool must always be used with the same allocator.
+    /// - This pool must always be used with the same allocator.
+    /// - The pool must not be used again after calling this function.
     #[inline]
     pub(crate) unsafe fn clear_and_free(&mut self, alloc: &impl Allocator) {
         self.clear();
-        let node_layout = const { node_layout::<I, V>().0 };
-        let layout = unsafe {
-            Layout::from_size_align_unchecked(self.capacity as usize, node_layout.align())
-        };
-        unsafe {
-            alloc.deallocate(self.ptr, layout);
+        if self.capacity != 0 {
+            let node_layout = const { node_layout::<I, V>().0 };
+            let layout = unsafe {
+                Layout::from_size_align_unchecked(self.capacity as usize, node_layout.align())
+            };
+            unsafe {
+                alloc.deallocate(self.ptr, layout);
+            }
         }
-        self.capacity = 0;
     }
 
     /// Debug checks to ensure a `NodeRef` is valid.
