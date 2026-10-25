@@ -157,11 +157,15 @@ pub(crate) trait SimdSearch: Int {
             // because `len` is guaranteed to be a power of 2 and the last key
             // is guaranteed to be the maximum integer value.
             //
-            // Since elements in a node have a 2/3 chance of being in
-            // the first half of the node, this means we have a 2/3 chance of not
-            // needing to load the second half of the keys into cache.
+            // Since elements in a node have a 2/3 chance of being in the first
+            // half of the node, this means we have a 2/3 chance of not needing
+            // to load the second half of the keys into cache.
             let key = unsafe { *keys.get_unchecked(mid - 1) };
-            base = hint::select_unpredictable(Self::bias_cmp(search, key).is_gt(), mid, base);
+            // Comparing the stored key first encourages LLVM to use
+            // CMOVB/CMOVAE rather than CMOVA/CMOVBE, which have higher latency
+            // on some CPUs. See
+            // https://github.com/llvm/llvm-project/issues/113965.
+            base = hint::select_unpredictable(Self::bias_cmp(key, search).is_lt(), mid, base);
 
             len /= 2;
         }
