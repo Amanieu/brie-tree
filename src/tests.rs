@@ -458,7 +458,7 @@ fn iter() {
     let input: Vec<_> = (0..1000u32).collect();
     let mut shuffled = input.clone();
     shuffled.shuffle(&mut rand::rng());
-    for &i in &input {
+    for &i in &shuffled {
         btree.insert(i, i);
     }
 
