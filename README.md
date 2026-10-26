@@ -5,7 +5,7 @@ A fast [B+ Tree] implementation that uses integer keys.
 The API is similar to the standard library's [`BTreeMap`] with some significant
 differences:
 - Lookups and insertions are 2-4x faster than `BTreeMap`.
-- `BTree` can optionally be used as a multi-map and hold duplicate keys.
+- `BTree` acts as a multi-map: it can hold duplicate keys and insertion never replaces existing entries.
 - Keys must be integer types or convertible to integers via the `BTreeKey` trait.
 - Elements in the tree are ordered by the integer value of the key instead
   of the `Ord` implementation of the keys.

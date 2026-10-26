@@ -299,7 +299,7 @@ fn max_metadata_layouts_and_drop() {
     }
     let mut tree = BTree::<u128, Aligned>::new();
     for _ in 0..100 {
-        tree.insert_multi(
+        tree.insert(
             u128::MAX,
             Aligned {
                 _value: Box::new(0),
@@ -316,9 +316,9 @@ fn max_metadata_layouts_and_drop() {
     let mut zst = BTree::<u8, ()>::new();
     let mut bytes = BTree::<u8, u8>::new();
     for _ in 0..256 {
-        zst.insert_multi(u8::MAX, ());
+        zst.insert(u8::MAX, ());
         zst.check_invariants(true);
-        bytes.insert_multi(u8::MAX, 1);
+        bytes.insert(u8::MAX, 1);
         bytes.check_invariants(true);
     }
     zst.iter().count();

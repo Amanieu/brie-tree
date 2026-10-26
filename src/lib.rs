@@ -50,12 +50,12 @@ pub trait BTreeKey: Copy {
     fn from_int(int: Self::Int) -> Self;
 }
 
-/// An ordered map based on a [B+ Tree].
+/// An ordered multi-map based on a [B+ Tree].
 ///
 /// This is similar to the standard library's `BTreeMap` but differs in several
 /// ways:
 /// - Lookups and insertions are 2-4x faster than `BTreeMap`.
-/// - `BTree` can optionally be used as a multi-map and hold duplicate keys.
+/// - `BTree` holds duplicate keys: insertion never replaces existing entries.
 /// - Keys must be `Copy` and convertible to and from integers via the
 ///   [`BTreeKey`] trait.
 /// - Elements in the tree are ordered by the integer value of the key instead
@@ -63,6 +63,10 @@ pub trait BTreeKey: Copy {
 /// - [`Cursor`] and [`CursorMut`] can be used to seek back-and-forth in the
 ///   tree while inserting or removing elements.
 /// - Iterators only support forward iteration.
+///
+/// [`BTree::get`], [`BTree::get_mut`] and [`BTree::remove`] operate on only one
+/// entry with the given key (arbitrarily chosen). Use [`BTree::range`] or
+/// [`BTree::cursor_mut_at`] to access all entries with a given key.
 ///
 /// The data structure design is based on the [B- Tree] by Sergey Slotin, but
 /// has been significantly extended.
@@ -157,53 +161,39 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
         unsafe { NodeRef::zero().end(&self.leaf) == pos!(0) }
     }
 
-    /// Returns a reference to the value corresponding to the key.
+    /// Returns a reference to one value associated with the key, or `None` if
+    /// the key is absent.
+    ///
+    /// If multiple entries have this key, one is arbitrarily chosen.
     #[inline]
     pub fn get(&self, key: K) -> Option<&V> {
         self.range(key..=key).next().map(|(_k, v)| v)
     }
 
-    /// Returns a mutable reference to the value corresponding to the key.
+    /// Returns a mutable reference to one value associated with the key, or
+    /// `None` if the key is absent.
+    ///
+    /// If multiple entries have this key, one is arbitrarily chosen.
     #[inline]
     pub fn get_mut(&mut self, key: K) -> Option<&mut V> {
         self.range_mut(key..=key).next().map(|(_k, v)| v)
     }
 
-    /// Inserts a key-value pair into the map.
+    /// Inserts a key-value pair into the multi-map.
     ///
-    /// If the map did not have this key present, `None` is returned.
-    ///
-    /// If the map did have this key present, the value is updated, and the old
-    /// value is returned.
+    /// Existing entries with the same key are not replaced.
     #[inline]
-    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-        let mut cursor = unsafe { CursorMut::uninit(self) };
-        cursor.seek(int_from_key(key));
-        if let Some((k, v)) = cursor.entry_mut()
-            && k.to_int() == key.to_int()
-        {
-            return Some(mem::replace(v, value));
-        }
-        cursor.insert_before(key, value);
-        None
-    }
-
-    /// Inserts a key-value pair into the map while allowing for multiple
-    /// identical keys.
-    ///
-    /// This allows the `BTree` to be used as a multi-map where each key can
-    /// have multiple values. In this case [`BTree::get`], [`BTree::get_mut`]
-    /// and [`BTree::remove`] will only operate on one of the associated values
-    /// (arbitrarily chosen).
-    #[inline]
-    pub fn insert_multi(&mut self, key: K, value: V) {
+    pub fn insert(&mut self, key: K, value: V) {
         let mut cursor = unsafe { CursorMut::uninit(self) };
         cursor.seek(int_from_key(key));
         cursor.insert_before(key, value);
     }
 
-    /// Removes a key from the map, returning the value at the key if the key
-    /// was previously in the map.
+    /// Removes one entry with the given key, returning its value, or `None` if
+    /// the key is absent.
+    ///
+    /// If multiple entries have this key, one is arbitrarily chosen. Other
+    /// entries with the same key remain in the tree.
     #[inline]
     pub fn remove(&mut self, key: K) -> Option<V> {
         let mut cursor = unsafe { CursorMut::uninit(self) };
@@ -257,6 +247,7 @@ impl<K: BTreeKey, V, A: Default + Allocator> Default for BTree<K, V, A> {
 }
 
 impl<K: BTreeKey, V> FromIterator<(K, V)> for BTree<K, V> {
+    /// Creates a multi-map containing every input entry, including duplicate keys.
     #[inline]
     fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
         let mut btree = BTree::new();
@@ -266,6 +257,8 @@ impl<K: BTreeKey, V> FromIterator<(K, V)> for BTree<K, V> {
 }
 
 impl<K: BTreeKey, V, A: Allocator> Extend<(K, V)> for BTree<K, V, A> {
+    /// Inserts every input entry, including duplicate keys, without replacing
+    /// any existing entries.
     #[inline]
     fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
         iter.into_iter().for_each(|(k, v)| {
@@ -284,6 +277,8 @@ impl<K: BTreeKey, V: Clone, A: Allocator + Clone> Clone for BTree<K, V, A> {
 }
 
 impl<'a, K: BTreeKey, V: Clone, A: Allocator> Extend<(K, &'a V)> for BTree<K, V, A> {
+    /// Clones each input value and inserts every entry, including duplicate
+    /// keys, without replacing any existing entries.
     #[inline]
     fn extend<T: IntoIterator<Item = (K, &'a V)>>(&mut self, iter: T) {
         iter.into_iter().for_each(|(k, v)| {

@@ -54,7 +54,6 @@ impl_key! {
 enum Action<Key, Value> {
     Clear,
     Insert(Key, Value),
-    InsertMulti(Key, Value),
     Get(Key),
     Remove(Key),
     Range(Bound<Key>, Bound<Key>),
@@ -119,18 +118,7 @@ fn run<
                     vec.clear();
                 }
                 Action::Insert(key, value) => {
-                    let old = btree.insert(key, value);
-                    let index = vec.partition_point(|&(k, _v)| k < key);
-                    if index != vec.len() && vec[index].0 == key {
-                        assert_eq!(old, Some(vec[index].1));
-                        vec[index].1 = value;
-                    } else {
-                        vec.insert(index, (key, value));
-                        assert_eq!(old, None);
-                    }
-                }
-                Action::InsertMulti(key, value) => {
-                    btree.insert_multi(key, value);
+                    btree.insert(key, value);
                     let index = vec.partition_point(|&(k, _v)| k < key);
                     vec.insert(index, (key, value));
                 }
