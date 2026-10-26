@@ -84,6 +84,7 @@ impl SimdSearch for u32 {
         unsafe { rvv_search!(keys, search, "e32", "ltu") }
     }
 }
+#[cfg(target_arch = "riscv64")]
 impl SimdSearch for u64 {
     const SIMD_WIDTH: usize = 16;
     #[inline]
@@ -91,6 +92,8 @@ impl SimdSearch for u64 {
         unsafe { rvv_search!(keys, search, "e64", "ltu") }
     }
 }
+#[cfg(target_arch = "riscv32")]
+impl SimdSearch for u64 {}
 impl SimdSearch for u128 {}
 impl SimdSearch for i8 {
     const SIMD_WIDTH: usize = 128;
@@ -113,6 +116,7 @@ impl SimdSearch for i32 {
         unsafe { rvv_search!(keys, search, "e32", "lt") }
     }
 }
+#[cfg(target_arch = "riscv64")]
 impl SimdSearch for i64 {
     const SIMD_WIDTH: usize = 16;
     #[inline]
@@ -120,4 +124,6 @@ impl SimdSearch for i64 {
         unsafe { rvv_search!(keys, search, "e64", "lt") }
     }
 }
+#[cfg(target_arch = "riscv32")]
+impl SimdSearch for i64 {}
 impl SimdSearch for i128 {}

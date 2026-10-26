@@ -71,7 +71,7 @@ jobs:
     - uses: dtolnay/rust-toolchain@nightly
       with:
         components: clippy,rustfmt
-        targets: thumbv6m-none-eabi
+        targets: thumbv6m-none-eabi,riscv32imac-unknown-none-elf
     - name: Rustfmt
       run: cargo fmt --all -- --check
     - name: Clippy lints
@@ -82,3 +82,7 @@ jobs:
       run: cargo install cargo-msrv && cargo msrv --workspace verify
     - name: Check no_std support
       run: cargo check --target thumbv6m-none-eabi
+    - name: Check RV32 vector support
+      run: cargo check --lib --target riscv32imac-unknown-none-elf
+      env:
+        RUSTFLAGS: -Ctarget-feature=+v
