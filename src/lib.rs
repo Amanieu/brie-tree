@@ -22,8 +22,6 @@ mod stack;
 #[cfg(test)]
 mod tests;
 
-pub use nonmax;
-
 pub use cursor::*;
 pub use iter::*;
 
@@ -31,27 +29,17 @@ use crate::int::int_from_key;
 
 /// Trait which must be implemented for all keys inserted into a [`BTree`].
 ///
-/// [`BTree`] requires that keys be integers and reserves the maximum integer
-/// value for internal use. This trait is already implementated for all integers
-/// from the [`nonmax`] crate, but this crate allows for custom key types that
-/// are convertible to/from an integer.
+/// This trait is implemented for fixed-width primitive integers.
+///
+/// Custom key types can implement it by converting to and from an integer.
 ///
 /// Note that keys in the [`BTree`] are ordered by their integer value and not
 /// the [`Ord`] implementation of the key type.
 pub trait BTreeKey: Copy {
-    /// Non-max integer type that this key
+    /// Integer representation of this key.
     ///
-    /// This must be one of the integer types from the [`nonmax`] crate:
-    /// - [`nonmax::NonMaxU8`]
-    /// - [`nonmax::NonMaxU16`]
-    /// - [`nonmax::NonMaxU32`]
-    /// - [`nonmax::NonMaxU64`]
-    /// - [`nonmax::NonMaxU128`]
-    /// - [`nonmax::NonMaxI8`]
-    /// - [`nonmax::NonMaxI16`]
-    /// - [`nonmax::NonMaxI32`]
-    /// - [`nonmax::NonMaxI64`]
-    /// - [`nonmax::NonMaxI128`]
+    /// This must be `u8`, `u16`, `u32`, `u64`, `u128`, `i8`, `i16`, `i32`,
+    /// `i64`, or `i128`.
     #[allow(private_bounds)]
     type Int: BTreeInteger;
 
@@ -70,8 +58,6 @@ pub trait BTreeKey: Copy {
 /// - `BTree` can optionally be used as a multi-map and hold duplicate keys.
 /// - Keys must be `Copy` and convertible to and from integers via the
 ///   [`BTreeKey`] trait.
-/// - The maximum integer value is reserved for internal use and cannot be used
-///   by keys.
 /// - Elements in the tree are ordered by the integer value of the key instead
 ///   of the [`Ord`] implementation of the keys.
 /// - [`Cursor`] and [`CursorMut`] can be used to seek back-and-forth in the
@@ -123,9 +109,7 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
     #[inline]
     fn init_root(&mut self, root: UninitNodeRef) {
         let root = unsafe { root.init_keys(&mut self.leaf) };
-        unsafe {
-            root.set_next_leaf(None, &mut self.leaf);
-        }
+        unsafe { root.set_metadata(pos!(0), NodeRef::INVALID, &mut self.leaf) };
         debug_assert_eq!(root, NodeRef::zero());
         self.root = NodeRef::zero();
     }
@@ -168,11 +152,9 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
     /// Returns `true` if the map contains no elements.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        if self.height != Height::leaf() {
-            return false;
-        }
-        let first_key = unsafe { self.root.key(pos!(0), &self.leaf) };
-        first_key == K::Int::MAX
+        // The first leaf always has offset zero and is never deleted. It is
+        // empty exactly when the tree is empty.
+        unsafe { NodeRef::zero().end(&self.leaf) == pos!(0) }
     }
 
     /// Returns a reference to the value corresponding to the key.

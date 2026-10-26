@@ -17,37 +17,77 @@ use crate::{
 /// Common base for mutable and immutable iterators.
 #[derive(Clone)]
 pub(crate) struct RawIter<I: BTreeInteger> {
-    /// Current leaf node.
-    pub(crate) node: NodeRef,
+    /// Current leaf node, or `NodeRef::INVALID` if the iterator is exhausted.
+    node: NodeRef,
 
     /// Current position in the node.
     ///
-    /// This must point to a valid entry *except* if the iterator has reached
-    /// the end of the tree, in which case it must point to the first `Int::MAX`
-    /// key in the node.
-    pub(crate) pos: NodePos<I>,
+    /// This must point to a live entry when `node` is valid, and is ignored
+    /// when the iterator is exhausted.
+    pos: NodePos<I>,
 }
 
 impl<I: BTreeInteger> RawIter<I> {
-    /// Returns `true` if the iterator points to the end of the tree.
+    /// Creates an exhausted iterator.
+    #[inline]
+    fn empty() -> Self {
+        Self {
+            node: NodeRef::INVALID,
+            pos: NodePos::zero(),
+        }
+    }
+
+    /// Creates an iterator from a leaf position obtained by a lookup.
     ///
     /// # Safety
     ///
-    /// `leaf_pool` must point to the `NodePool` for leaf nodes in the tree.
+    /// `node` must be an initialized leaf in `leaf_pool`.
+    /// `pos` must point to a live entry or the first unused slot.
     #[inline]
-    unsafe fn is_end<V>(&self, leaf_pool: &NodePool<I, V>) -> bool {
-        unsafe { self.node.key(self.pos, leaf_pool) == I::MAX }
+    pub(crate) unsafe fn new<V>(
+        node: NodeRef,
+        pos: NodePos<I>,
+        leaf_pool: &NodePool<I, V>,
+    ) -> Self {
+        // Allocated nodes cannot be the sentinel. Expose this to the optimizer
+        // so an immediate next() need not check the input node again.
+        unsafe { hint::assert_unchecked(node != NodeRef::INVALID) };
+
+        let mut iter = Self { node, pos };
+        // A lookup may point to the first unused slot instead of a live MAX key.
+        if unsafe { iter.is_leaf_end(leaf_pool) } {
+            iter.node = NodeRef::INVALID;
+        }
+        iter
     }
 
-    /// Returns the next key that the iterator will yield, or `I::MAX` if it is
+    /// Tests whether the position is the first unused slot, checking length
+    /// only for MAX.
+    ///
+    /// # Safety
+    ///
+    /// `self.node` must be an initialized leaf in `leaf_pool`.
+    /// `self.pos` must point to a live entry or the first unused slot.
+    #[inline]
+    unsafe fn is_leaf_end<V>(&self, leaf_pool: &NodePool<I, V>) -> bool {
+        debug_assert!(self.pos <= unsafe { self.node.end(leaf_pool) });
+        unsafe {
+            self.node.key(self.pos, leaf_pool) == I::MAX && self.pos == self.node.end(leaf_pool)
+        }
+    }
+
+    /// Returns the next key that the iterator will yield, or `None` if it is
     /// at the end of the tree.
     ///
     /// # Safety
     ///
     /// `leaf_pool` must point to the `NodePool` for leaf nodes in the tree.
     #[inline]
-    unsafe fn next_key<V>(&self, leaf_pool: &NodePool<I, V>) -> I::Raw {
-        unsafe { self.node.key(self.pos, leaf_pool) }
+    unsafe fn next_key<V>(&self, leaf_pool: &NodePool<I, V>) -> Option<I::Raw> {
+        if self.node == NodeRef::INVALID {
+            return None;
+        }
+        Some(unsafe { self.node.key(self.pos, leaf_pool) })
     }
 
     /// Advances the iterator to the next element in the tree.
@@ -58,28 +98,23 @@ impl<I: BTreeInteger> RawIter<I> {
     #[inline]
     pub(crate) unsafe fn next<V>(&mut self, leaf_pool: &NodePool<I, V>) -> Option<(I, NonNull<V>)> {
         // Get the current element that will be returned.
-        let key = unsafe { I::from_raw(self.node.key(self.pos, leaf_pool))? };
+        let key = I::from_raw(unsafe { self.next_key(leaf_pool) }?);
         let value = unsafe { self.node.values_ptr(leaf_pool).add(self.pos.index()) };
 
         // First, try to move to the next element in the current leaf.
         self.pos = unsafe { self.pos.next() };
 
         // If we reached the end of the leaf then we need to advance to the next
-        // leaf node.
-        if unsafe { self.is_end(leaf_pool) } {
-            // If we've reached the end of the tree then we can leave the
-            // iterator pointing to an `Int::MAX` key.
-            if let Some(next_leaf) = unsafe { self.node.next_leaf(leaf_pool) } {
-                self.node = next_leaf;
-                self.pos = NodePos::zero();
-
-                // The tree invariants guarantee that leaf nodes are always at least
-                // half full, except if this is the root node. However this can't be the
-                // root node since there is more than one node.
-                unsafe {
-                    hint::assert_unchecked(!self.is_end(leaf_pool));
-                }
-            }
+        // leaf node, or the sentinel if this was the last leaf.
+        if unsafe { self.is_leaf_end(leaf_pool) } {
+            self.node = unsafe { self.node.next_leaf(leaf_pool) };
+            // A successor leaf cannot be the root, so it is at least half full
+            // and position zero is live unless we reached the sentinel.
+            debug_assert!(
+                self.node == NodeRef::INVALID
+                    || unsafe { self.node.end(leaf_pool).index() >= I::B / 2 }
+            );
+            self.pos = NodePos::zero();
         }
 
         Some((key, value.cast()))
@@ -264,7 +299,7 @@ impl<'a, K: BTreeKey, V, A: Allocator> FusedIterator for ValuesMut<'a, K, V, A> 
 /// An iterator over a sub-range of the entries of a [`BTree`].
 pub struct Range<'a, K: BTreeKey, V, A: Allocator = Global> {
     raw: RawIter<K::Int>,
-    end: <K::Int as BTreeInteger>::Raw,
+    inclusive_end: <K::Int as BTreeInteger>::Raw,
     btree: &'a BTree<K, V, A>,
 }
 
@@ -274,7 +309,8 @@ impl<'a, K: BTreeKey, V, A: Allocator> Iterator for Range<'a, K, V, A> {
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {
-            if K::Int::cmp(self.raw.next_key(&self.btree.leaf), self.end).is_ge() {
+            let key = self.raw.next_key(&self.btree.leaf)?;
+            if K::Int::cmp(key, self.inclusive_end).is_gt() {
                 return None;
             }
 
@@ -291,7 +327,7 @@ impl<'a, K: BTreeKey, V, A: Allocator> Clone for Range<'a, K, V, A> {
     fn clone(&self) -> Self {
         Self {
             raw: self.raw.clone(),
-            end: self.end,
+            inclusive_end: self.inclusive_end,
             btree: self.btree,
         }
     }
@@ -300,7 +336,7 @@ impl<'a, K: BTreeKey, V, A: Allocator> Clone for Range<'a, K, V, A> {
 /// A mutable iterator over a sub-range of the entries of a [`BTree`].
 pub struct RangeMut<'a, K: BTreeKey, V, A: Allocator = Global> {
     raw: RawIter<K::Int>,
-    end: <K::Int as BTreeInteger>::Raw,
+    inclusive_end: <K::Int as BTreeInteger>::Raw,
     btree: &'a mut BTree<K, V, A>,
 }
 
@@ -310,7 +346,8 @@ impl<'a, K: BTreeKey, V, A: Allocator> Iterator for RangeMut<'a, K, V, A> {
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {
-            if K::Int::cmp(self.raw.next_key(&self.btree.leaf), self.end).is_ge() {
+            let key = self.raw.next_key(&self.btree.leaf)?;
+            if K::Int::cmp(key, self.inclusive_end).is_gt() {
                 return None;
             }
 
@@ -331,13 +368,21 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
         // never deleted.
         let node = NodeRef::zero();
         let pos = pos!(0);
-        RawIter { node, pos }
+        unsafe { RawIter::new(node, pos, &self.leaf) }
     }
 
     /// Returns a [`RawIter`] pointing at the first element with key greater
     /// than or equal to `key`.
     #[inline]
-    pub(crate) fn raw_iter_from(&self, key: <K::Int as BTreeInteger>::Raw) -> RawIter<K::Int> {
+    pub(crate) fn raw_iter_from(
+        &self,
+        key: Option<<K::Int as BTreeInteger>::Raw>,
+    ) -> RawIter<K::Int> {
+        // An excluded MAX bound is past the end of the tree.
+        let Some(key) = key else {
+            return RawIter::empty();
+        };
+
         // Go down the tree, at each internal node selecting the first sub-tree
         // with key greater than or equal to the search key. This sub-tree will
         // only contain keys less than or equal to its key.
@@ -354,7 +399,7 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
         // search key.
         let keys = unsafe { node.keys(&self.leaf) };
         let pos = unsafe { K::Int::search(keys, key) };
-        RawIter { node, pos }
+        unsafe { RawIter::new(node, pos, &self.leaf) }
     }
 
     /// Gets an iterator over the entries of the map, sorted by key.
@@ -380,7 +425,7 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
     #[inline]
     pub fn iter_from(&self, bound: Bound<K>) -> Iter<'_, K, V, A> {
         let raw = match bound {
-            Bound::Included(key) => self.raw_iter_from(int_from_key(key)),
+            Bound::Included(key) => self.raw_iter_from(Some(int_from_key(key))),
             Bound::Excluded(key) => self.raw_iter_from(K::Int::increment(int_from_key(key))),
             Bound::Unbounded => self.raw_iter(),
         };
@@ -392,7 +437,7 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
     #[inline]
     pub fn iter_mut_from(&mut self, bound: Bound<K>) -> IterMut<'_, K, V, A> {
         let raw = match bound {
-            Bound::Included(key) => self.raw_iter_from(int_from_key(key)),
+            Bound::Included(key) => self.raw_iter_from(Some(int_from_key(key))),
             Bound::Excluded(key) => self.raw_iter_from(K::Int::increment(int_from_key(key))),
             Bound::Unbounded => self.raw_iter(),
         };
@@ -432,19 +477,26 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
     /// forward iteration.
     #[inline]
     pub fn range(&self, range: impl RangeBounds<K>) -> Range<'_, K, V, A> {
-        let raw = match range.start_bound() {
-            Bound::Included(&key) => self.raw_iter_from(int_from_key(key)),
+        let mut raw = match range.start_bound() {
+            Bound::Included(&key) => self.raw_iter_from(Some(int_from_key(key))),
             Bound::Excluded(&key) => self.raw_iter_from(K::Int::increment(int_from_key(key))),
             Bound::Unbounded => self.raw_iter(),
         };
-        let end = match range.end_bound() {
-            Bound::Included(&key) => K::Int::increment(int_from_key(key)),
-            Bound::Excluded(&key) => int_from_key(key),
+        let inclusive_end = match range.end_bound() {
+            Bound::Included(&key) => int_from_key(key),
+            Bound::Excluded(&key) => {
+                let inclusive_end = K::Int::wrapping_decrement(int_from_key(key));
+                if inclusive_end == K::Int::MAX {
+                    // No key is below MIN, so the range is empty.
+                    raw.node = NodeRef::INVALID;
+                }
+                inclusive_end
+            }
             Bound::Unbounded => K::Int::MAX,
         };
         Range {
             raw,
-            end,
+            inclusive_end,
             btree: self,
         }
     }
@@ -455,19 +507,26 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
     /// forward iteration.
     #[inline]
     pub fn range_mut(&mut self, range: impl RangeBounds<K>) -> RangeMut<'_, K, V, A> {
-        let raw = match range.start_bound() {
-            Bound::Included(&key) => self.raw_iter_from(int_from_key(key)),
+        let mut raw = match range.start_bound() {
+            Bound::Included(&key) => self.raw_iter_from(Some(int_from_key(key))),
             Bound::Excluded(&key) => self.raw_iter_from(K::Int::increment(int_from_key(key))),
             Bound::Unbounded => self.raw_iter(),
         };
-        let end = match range.end_bound() {
-            Bound::Included(&key) => K::Int::increment(int_from_key(key)),
-            Bound::Excluded(&key) => int_from_key(key),
+        let inclusive_end = match range.end_bound() {
+            Bound::Included(&key) => int_from_key(key),
+            Bound::Excluded(&key) => {
+                let inclusive_end = K::Int::wrapping_decrement(int_from_key(key));
+                if inclusive_end == K::Int::MAX {
+                    // No key is below MIN, so the range is empty.
+                    raw.node = NodeRef::INVALID;
+                }
+                inclusive_end
+            }
             Bound::Unbounded => K::Int::MAX,
         };
         RangeMut {
             raw,
-            end,
+            inclusive_end,
             btree: self,
         }
     }

@@ -3,24 +3,27 @@
 use std::{fmt::Debug, ops::Bound};
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use brie_tree::{BTree, BTreeKey, nonmax::*};
+use brie_tree::{BTree, BTreeKey};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Key<Int>(Int);
 
 macro_rules! impl_key {
-    ($($int:ident $nonmax:ident,)*) => {
+    ($($int:ident,)*) => {
         $(
-            impl<'a> Arbitrary<'a> for Key<$nonmax> {
+            impl<'a> Arbitrary<'a> for Key<$int> {
                 fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
-                    Ok(Key(
-                        $nonmax::new(u.int_in_range(0..=$int::MAX - 1)?).unwrap()
-                    ))
+                    // Exercise extrema frequently, even for wide integers.
+                    Ok(Key(match u.int_in_range(0..=7)? {
+                        0 => $int::MIN,
+                        1 => $int::MAX,
+                        _ => u.arbitrary()?,
+                    }))
                 }
             }
-            impl BTreeKey for Key<$nonmax> {
-                type Int = $nonmax;
+            impl BTreeKey for Key<$int> {
+                type Int = $int;
 
                 fn to_int(self) -> Self::Int {
                     self.0
@@ -35,16 +38,16 @@ macro_rules! impl_key {
 }
 
 impl_key! {
-    u8 NonMaxU8,
-    u16 NonMaxU16,
-    u32 NonMaxU32,
-    u64 NonMaxU64,
-    u128 NonMaxU128,
-    i8 NonMaxI8,
-    i16 NonMaxI16,
-    i32 NonMaxI32,
-    i64 NonMaxI64,
-    i128 NonMaxI128,
+    u8,
+    u16,
+    u32,
+    u64,
+    u128,
+    i8,
+    i16,
+    i32,
+    i64,
+    i128,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -77,16 +80,16 @@ enum CursorMutAction<Key, Value> {
 
 #[derive(Arbitrary, Debug)]
 enum KeyType<Value> {
-    U8(Vec<Action<Key<NonMaxU8>, Value>>),
-    U16(Vec<Action<Key<NonMaxU16>, Value>>),
-    U32(Vec<Action<Key<NonMaxU32>, Value>>),
-    U64(Vec<Action<Key<NonMaxU64>, Value>>),
-    U128(Vec<Action<Key<NonMaxU128>, Value>>),
-    I8(Vec<Action<Key<NonMaxI8>, Value>>),
-    I16(Vec<Action<Key<NonMaxI16>, Value>>),
-    I32(Vec<Action<Key<NonMaxI32>, Value>>),
-    I64(Vec<Action<Key<NonMaxI64>, Value>>),
-    I128(Vec<Action<Key<NonMaxI128>, Value>>),
+    U8(Vec<Action<Key<u8>, Value>>),
+    U16(Vec<Action<Key<u16>, Value>>),
+    U32(Vec<Action<Key<u32>, Value>>),
+    U64(Vec<Action<Key<u64>, Value>>),
+    U128(Vec<Action<Key<u128>, Value>>),
+    I8(Vec<Action<Key<i8>, Value>>),
+    I16(Vec<Action<Key<i16>, Value>>),
+    I32(Vec<Action<Key<i32>, Value>>),
+    I64(Vec<Action<Key<i64>, Value>>),
+    I128(Vec<Action<Key<i128>, Value>>),
 }
 
 #[derive(Arbitrary, Debug)]

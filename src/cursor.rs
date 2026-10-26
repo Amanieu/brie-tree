@@ -30,10 +30,15 @@ pub(crate) struct RawCursor<K: BTreeKey, V, A: Allocator, Ref: Deref<Target = BT
     ///   in-bounds.
     /// - Positions in leaf nodes must point to a valid entry *except* if the
     ///   cursor has reached the end of the tree, in which case it must point to
-    ///   the first `Int::MAX` key in the node.
+    ///   the first unused slot in the node.
     ///
     /// These invariants may be temporarily violated during cursor operations.
     stack: <K::Int as BTreeInteger>::Stack,
+
+    /// Cached first unused position in the current leaf.
+    ///
+    /// May be temporarily stale during structural mutations.
+    leaf_end: NodePos<K::Int>,
 
     /// Reference to the underlying `BTree`.
     ///
@@ -51,6 +56,7 @@ where
     fn clone(&self) -> Self {
         Self {
             stack: self.stack.clone(),
+            leaf_end: self.leaf_end,
             btree: self.btree.clone(),
         }
     }
@@ -78,6 +84,27 @@ impl<K: BTreeKey, V, A: Allocator, Ref: Deref<Target = BTree<K, V, A>>> RawCurso
         let keys = unsafe { node.keys(&self.btree.leaf) };
         let pos = unsafe { K::Int::search(keys, key) };
         self.stack[height] = (node, pos);
+        self.leaf_end = unsafe { node.end(&self.btree.leaf) };
+    }
+
+    /// Initializes a cursor to point just past the last entry.
+    #[inline]
+    fn seek_end(&mut self) {
+        let mut height = self.btree.height;
+        let mut node = self.btree.root;
+        while let Some(down) = height.down() {
+            let pos = unsafe { node.end_internal(&self.btree.internal).prev() };
+            self.stack[height] = (node, pos);
+            node = unsafe { node.value(pos, &self.btree.internal).assume_init_read() };
+            height = down;
+        }
+        let pos = unsafe { node.end(&self.btree.leaf) };
+        self.stack[height] = (node, pos);
+        self.leaf_end = pos;
+
+        // The first unused slot contains MAX, so iterator conversions can
+        // recognize this as the end without loading the key again.
+        unsafe { hint::assert_unchecked(node.key(pos, &self.btree.leaf) == K::Int::MAX) };
     }
 
     /// Helper function to check that cursor invariants are maintained.
@@ -100,14 +127,17 @@ impl<K: BTreeKey, V, A: Allocator, Ref: Deref<Target = BTree<K, V, A>>> RawCurso
             height = up;
         }
 
-        // If the leaf node points to an `Int::MAX` key then so must all
-        // internal nodes.
-        let (node, pos) = self.stack[Height::leaf()];
-        if unsafe { node.key(pos, &self.btree.leaf) } == K::Int::MAX {
+        debug_assert_eq!(self.leaf_end, unsafe {
+            self.stack[Height::leaf()].0.end(&self.btree.leaf)
+        });
+
+        // A cursor at the end of the tree must be on the last child at every
+        // internal level.
+        if self.is_end() {
             let mut height = Height::leaf();
             while let Some(up) = height.up(self.btree.height) {
                 let (node, pos) = self.stack[up];
-                debug_assert_eq!(unsafe { node.key(pos, &self.btree.internal) }, K::Int::MAX);
+                debug_assert!(unsafe { node.is_last_child(pos, &self.btree.internal) });
                 height = up;
             }
         }
@@ -118,7 +148,9 @@ impl<K: BTreeKey, V, A: Allocator, Ref: Deref<Target = BTree<K, V, A>>> RawCurso
     /// Returns `true` if the cursor points to the end of the tree.
     #[inline]
     fn is_end(&self) -> bool {
-        self.entry().is_none()
+        let pos = self.stack[Height::leaf()].1;
+        debug_assert!(pos <= self.leaf_end);
+        pos == self.leaf_end
     }
 
     /// Returns the key and a reference to the key and value at the cursor
@@ -126,8 +158,10 @@ impl<K: BTreeKey, V, A: Allocator, Ref: Deref<Target = BTree<K, V, A>>> RawCurso
     #[inline]
     fn entry(&self) -> Option<(K, NonNull<V>)> {
         let (node, pos) = self.stack[Height::leaf()];
-        let key = unsafe { node.key(pos, &self.btree.leaf) };
-        let key = key_from_int(key)?;
+        if self.is_end() {
+            return None;
+        }
+        let key = key_from_int(unsafe { node.key(pos, &self.btree.leaf) });
         let value = unsafe { node.values_ptr(&self.btree.leaf).add(pos.index()) };
         Some((key, value.cast()))
     }
@@ -142,14 +176,13 @@ impl<K: BTreeKey, V, A: Allocator, Ref: Deref<Target = BTree<K, V, A>>> RawCurso
         assert!(!self.is_end(), "called next() on cursor already at end");
 
         // Increment the position in the leaf node.
-        let (node, pos) = self.stack[Height::leaf()];
-        debug_assert_ne!(unsafe { node.key(pos, &self.btree.leaf) }, K::Int::MAX);
+        let (_node, pos) = self.stack[Height::leaf()];
         let pos = unsafe { pos.next() };
         self.stack[Height::leaf()].1 = pos;
 
         // If we reached the end of the leaf then we need to go up the tree to
         // find the next leaf node.
-        if unsafe { node.key(pos, &self.btree.leaf) } == K::Int::MAX {
+        if self.is_end() {
             self.next_leaf_node();
         }
 
@@ -186,18 +219,17 @@ impl<K: BTreeKey, V, A: Allocator, Ref: Deref<Target = BTree<K, V, A>>> RawCurso
         let mut height = Height::leaf();
         let mut node = loop {
             // If we reached the top of the tree then it means we are on the
-            // last entry at all levels of the tree. We've reached the end of
-            // the tree and can leave the cursor pointing on an `Int::MAX` key
-            // to indicate that.
+            // last child at every internal level. We've reached the end of
+            // the tree and can leave the cursor pointing to the first unused
+            // slot in the last leaf node.
             let Some(up) = height.up(self.btree.height) else {
                 return;
             };
 
-            // The last element of an internal node has a key of `Int::MAX`. If
-            // we are not at the last element then we can advance to the next
-            // sub-tree and go down that one.
+            // If we are not at the last child, advance to the next sub-tree
+            // and go down that one.
             let (node, pos) = &mut self.stack[up];
-            if unsafe { node.key(*pos, &self.btree.internal) } != K::Int::MAX {
+            if !unsafe { node.is_last_child(*pos, &self.btree.internal) } {
                 *pos = unsafe { pos.next() };
                 let node = unsafe { node.value(*pos, &self.btree.internal).assume_init_read() };
                 break node;
@@ -217,12 +249,13 @@ impl<K: BTreeKey, V, A: Allocator, Ref: Deref<Target = BTree<K, V, A>>> RawCurso
             height = down;
         }
         self.stack[Height::leaf()] = (node, pos!(0));
+        self.leaf_end = unsafe { node.end(&self.btree.leaf) };
 
         // The tree invariants guarantee that leaf nodes are always at least
         // half full, except if this is the root node. However this can't be the
         // root node since there is more than one node.
         unsafe {
-            hint::assert_unchecked(node.key(pos!(0), &self.btree.leaf) != K::Int::MAX);
+            hint::assert_unchecked(self.leaf_end >= pos!(K::Int::B / 2));
         }
     }
 
@@ -257,23 +290,23 @@ impl<K: BTreeKey, V, A: Allocator, Ref: Deref<Target = BTree<K, V, A>>> RawCurso
         };
 
         // We found a sub-tree, now go down all the way to a leaf node. Since
-        // these nodes are guaranteeed to be at least half full we can safely
-        // read the first element.
-        // TODO: Only search high half of the node.
+        // these nodes are guaranteed to be at least half full we can safely
+        // read the last element.
         while let Some(down) = height.down() {
-            let pos = unsafe { K::Int::search(node.keys(&self.btree.internal), K::Int::MAX) };
+            let pos = unsafe { node.end_internal(&self.btree.internal).prev() };
             self.stack[height] = (node, pos);
             node = unsafe { node.value(pos, &self.btree.internal).assume_init_read() };
             height = down;
         }
-        let pos = unsafe { K::Int::search(node.keys(&self.btree.leaf), K::Int::MAX) };
+        let pos = unsafe { node.end(&self.btree.leaf) };
         self.stack[Height::leaf()] = (node, unsafe { pos.prev() });
+        self.leaf_end = pos;
 
         // The tree invariants guarantee that leaf nodes are always at least
         // half full, except if this is the root node. However this can't be the
         // root node since there is more than one node.
         unsafe {
-            hint::assert_unchecked(pos.index() != 0);
+            hint::assert_unchecked(pos >= pos!(K::Int::B / 2));
         }
 
         self.check_invariants();
@@ -287,7 +320,7 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
     ///
     /// # Safety
     ///
-    /// `key` must be the largest non-`MAX` key in the current leaf node.
+    /// `key` must be the right-most key in the current leaf node.
     #[inline]
     unsafe fn update_leaf_max_key(&mut self, key: <K::Int as BTreeInteger>::Raw) {
         let mut height = Height::leaf();
@@ -295,7 +328,7 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
         // one in its node, or the root of the tree is reached.
         while let Some(up) = height.up(self.btree.height) {
             let (node, pos) = self.stack[up];
-            if unsafe { node.key(pos, &self.btree.internal) } != K::Int::MAX {
+            if !unsafe { node.is_last_child(pos, &self.btree.internal) } {
                 unsafe {
                     node.set_key(key, pos, &mut self.btree.internal);
                 }
@@ -313,10 +346,11 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
     fn insert<const AFTER: bool>(&mut self, key: K, value: V) {
         let key = int_from_key(key);
         let (node, pos) = self.stack[Height::leaf()];
+        let old_end = self.leaf_end;
 
         let insert_pos = if AFTER {
             assert!(
-                !self.is_end(),
+                pos < old_end,
                 "called insert_after() on cursor already at end"
             );
             unsafe { pos.next() }
@@ -324,30 +358,9 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
             pos
         };
         let target_pos = if AFTER { pos.index() } else { pos.index() + 1 };
-        let prev_key = unsafe { node.key(insert_pos, &self.btree.leaf) };
 
-        // If we are inserting the last key in a node then we need to update
-        // the sub-tree max key in the parent.
-        if prev_key == K::Int::MAX {
-            if AFTER {
-                unsafe {
-                    self.update_leaf_max_key(key);
-                }
-            } else {
-                // Note that because of the cursor invariants we don't need to
-                // update the sub-tree keys in any parent nodes:
-                // - If the cursor is at the end of the tree then all keys on
-                //   the stack have value `Int::MAX` already.
-                // - Otherwise the insertion doesn't happen at the end of the
-                //   node, so the maximum key doesn't change.
-                debug_assert!(self.is_end());
-            }
-        }
-
-        // Check if this insertion will cause the leaf node to become completely
-        // full. Specifically that after insertion the last key will *not* be
-        // `Int::MAX`, which violates the node invariant.
-        let overflow = unsafe { node.key(pos!(K::Int::B - 2), &self.btree.leaf) } != K::Int::MAX;
+        // Insertion must leave the final slot unused for metadata.
+        let overflow = old_end == pos!(K::Int::B - 1);
 
         // Save the next leaf pointer since it is overwritten by insertion.
         let next_leaf = unsafe { node.next_leaf(&self.btree.leaf) };
@@ -355,7 +368,22 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
         // Insert the new key and value in the leaf. Use a fast path for
         // inserting at the end of a node. This helps with common cases when
         // appending to the end of a tree.
-        if prev_key == K::Int::MAX {
+        if insert_pos == old_end {
+            // Appending changes the sub-tree maximum, unless the cursor is at
+            // the end of the tree, where all ancestor keys are already MAX.
+            //
+            // For insert_before, the cursor invariants mean ancestor keys need
+            // no update: at the end of the tree they are already MAX; otherwise
+            // the insertion is before a live entry and leaves the leaf maximum
+            // unchanged.
+            if AFTER {
+                unsafe {
+                    self.update_leaf_max_key(key);
+                }
+            } else {
+                debug_assert!(self.is_end());
+            }
+
             unsafe {
                 node.set_key(key, insert_pos, &mut self.btree.leaf);
                 node.value_mut(insert_pos, &mut self.btree.leaf)
@@ -372,8 +400,9 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
         if !overflow {
             // Restore next_leaf which will have been overwritten by the insert.
             unsafe {
-                node.set_next_leaf(next_leaf, &mut self.btree.leaf);
+                node.set_metadata(old_end.next(), next_leaf, &mut self.btree.leaf);
                 self.stack[Height::leaf()].1 = NodePos::new_unchecked(target_pos);
+                self.leaf_end = old_end.next();
             }
             return;
         }
@@ -390,10 +419,10 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
         let new_uninit_node = unsafe { self.btree.leaf.alloc_node(&self.btree.alloc) };
         let mut new_node = unsafe { node.split_into(new_uninit_node, &mut self.btree.leaf) };
 
-        // Update the next-leaf pointers for both nodes.
+        // Initialize the end positions and next-leaf pointers for both nodes.
         unsafe {
-            new_node.set_next_leaf(next_leaf, &mut self.btree.leaf);
-            node.set_next_leaf(Some(new_node), &mut self.btree.leaf);
+            new_node.set_metadata(pos!(K::Int::B / 2), next_leaf, &mut self.btree.leaf);
+            node.set_metadata(pos!(K::Int::B / 2), new_node, &mut self.btree.leaf);
         }
 
         // Keep track of where the cursor is in the tree by adjusting the
@@ -407,6 +436,7 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
             self.stack[Height::leaf()] = (node, unsafe { NodePos::new_unchecked(target_pos) });
             false
         };
+        self.leaf_end = pos!(K::Int::B / 2);
 
         // Propagate the split by inserting the new node in the next level of
         // the tree. This may cause that node to also be split if it gets full.
@@ -415,11 +445,8 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
             height = up;
             let (node, mut pos) = self.stack[height];
 
-            // The last 2 keys of leaf nodes are always `Int::MAX` so we can
-            // check if an insertion will cause an overflow by looking at
-            // whether the key at `B - 3` is `Int::MAX`.
-            let overflow =
-                unsafe { node.key(pos!(K::Int::B - 3), &self.btree.internal) } != K::Int::MAX;
+            let old_end = unsafe { node.end_internal(&self.btree.internal) };
+            let overflow = old_end == pos!(K::Int::B - 1);
 
             // The existing key for this sub-tree (max of all keys in sub-tree)
             // is correct for the second node of the split. Similarly the
@@ -440,6 +467,7 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
 
             // If the node is not full then we're done.
             if !overflow {
+                unsafe { node.set_end_internal(old_end.next(), &mut self.btree.internal) };
                 self.check_invariants();
                 return;
             }
@@ -461,7 +489,11 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
             // Allocate a new node and move the second half of the current node
             // to it.
             let new_uninit_node = unsafe { self.btree.internal.alloc_node(&self.btree.alloc) };
-            new_node = unsafe { node.split_into(new_uninit_node, &mut self.btree.internal) };
+            unsafe {
+                new_node = node.split_into(new_uninit_node, &mut self.btree.internal);
+                node.set_end_internal(pos!(K::Int::B / 2), &mut self.btree.internal);
+                new_node.set_end_internal(pos!(K::Int::B / 2), &mut self.btree.internal);
+            }
 
             // Keep track of where the cursor is in the tree by adjusting the
             // position on the stack if we were in the second half of the node
@@ -479,8 +511,8 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
         let new_uninit_root = unsafe { self.btree.internal.alloc_node(&self.btree.alloc) };
 
         // The new root only contains 2 elements: the original root node and the
-        // newly created split node. The only non-MAX key is the first one which
-        // holds the maximum key in the left sub-tree.
+        // newly created split node. The first key holds the maximum key in the
+        // left sub-tree; the second key stays MAX.
         let new_root;
         unsafe {
             new_root = new_uninit_root.init_keys(&mut self.btree.internal);
@@ -491,6 +523,7 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
             new_root
                 .value_mut(pos!(1), &mut self.btree.internal)
                 .write(new_node);
+            new_root.set_end_internal(pos!(2), &mut self.btree.internal);
         }
         self.btree.root = new_root;
 
@@ -520,13 +553,14 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
         let key = int_from_key(key);
 
         let (node, pos) = self.stack[Height::leaf()];
+        assert!(!self.is_end(), "called replace() on cursor already at end");
         let old_key = unsafe { node.key(pos, &self.btree.leaf) };
-        let old_key = key_from_int(old_key).expect("called replace() on cursor already at end");
+        let old_key = key_from_int(old_key);
 
         // If we are replacing the last key in a node then we need to update the
         // sub-tree max key in the parent.
-        unsafe {
-            if node.key(pos.next(), &self.btree.leaf) == K::Int::MAX {
+        if pos == unsafe { self.leaf_end.prev() } {
+            unsafe {
                 self.update_leaf_max_key(key);
             }
         }
@@ -554,29 +588,27 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
     fn remove(&mut self) -> (K, V) {
         let (node, pos) = self.stack[Height::leaf()];
 
-        // Check if this deletion will cause the leaf node to become less than
-        // half full. Specifically that after deletion last key in the first
-        // half will be`Int::MAX`, which violates the node invariant.
-        let underflow = unsafe { node.key(pos!(K::Int::B / 2), &self.btree.leaf) } == K::Int::MAX;
+        let old_end = self.leaf_end;
+        assert!(pos < old_end, "called remove() on cursor already at end");
+
+        // Check whether deletion will leave the leaf less than half full.
+        let underflow = old_end == pos!(K::Int::B / 2);
 
         // Extract the key and value that will be returned by this function.
-        let key = unsafe {
-            key_from_int(node.key(pos, &self.btree.leaf))
-                .expect("called remove() on cursor already at end")
-        };
+        let key = unsafe { key_from_int(node.key(pos, &self.btree.leaf)) };
         let value = unsafe { node.value(pos, &self.btree.leaf).assume_init_read() };
 
         // Remove the key and value from the node.
         unsafe {
             node.remove_key(pos, &mut self.btree.leaf);
             node.remove_value(pos, &mut self.btree.leaf);
+            node.set_end(old_end.prev(), &mut self.btree.leaf);
         }
 
         // If we removed the last key in a node then we need to update the
         // sub-tree max key in the parent.
         unsafe {
-            if node.key(pos, &self.btree.leaf) == K::Int::MAX && self.btree.height != Height::leaf()
-            {
+            if pos == old_end.prev() && self.btree.height != Height::leaf() {
                 // Leaf nodes must be at least half full if they are not the
                 // root node.
                 let new_max = node.key(pos.prev(), &self.btree.leaf);
@@ -600,11 +632,9 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
                     let mut height = up;
                     loop {
                         if let Some(up) = height.up(self.btree.height) {
-                            // Check if this node is less than half full. A
-                            // half-full internal node would have the first
-                            // `Int::MAX` key at `B / 2 - 1`.
-                            if unsafe { node.key(pos!(K::Int::B / 2 - 2), &self.btree.internal) }
-                                == K::Int::MAX
+                            // Check if this node is less than half full.
+                            if unsafe { node.end_internal(&self.btree.internal) }
+                                < pos!(K::Int::B / 2)
                             {
                                 // `node` is less than half-full, try to restore
                                 // the invariant by stealing from another node
@@ -628,7 +658,7 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
                             // single element then we can pop a level off the
                             // tree and free the old root node.
                             debug_assert_eq!(node, self.btree.root);
-                            if unsafe { node.key(pos!(0), &self.btree.internal) } == K::Int::MAX {
+                            if unsafe { node.end_internal(&self.btree.internal) } == pos!(1) {
                                 unsafe {
                                     self.btree.root = node
                                         .value(pos!(0), &self.btree.internal)
@@ -645,6 +675,8 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
                 }
             }
         }
+
+        self.leaf_end = unsafe { self.stack[Height::leaf()].0.end(&self.btree.leaf) };
 
         // If we ended up at the end of a leaf node due to the deletion, advance
         // the cursor to the next element.
@@ -681,14 +713,8 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
     ) -> Option<NodeRef> {
         // The child must have exactly `B / 2 - 1` elements.
         debug_assert_eq!(
-            unsafe {
-                if child_is_leaf {
-                    child.leaf_end(&self.btree.leaf).index()
-                } else {
-                    child.internal_end(&self.btree.internal).index()
-                }
-            },
-            K::Int::B / 2 - 1
+            unsafe { child.end(child_pool(self.btree)) },
+            pos!(K::Int::B / 2 - 1)
         );
 
         // Check if the child is the last sub-tree in its parent. The last
@@ -703,23 +729,17 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
         // We now need to select a sibling node to steal from or merge with.
         // Prefer using the next sub-tree as a sibling since it has a more
         // efficient code path.
-        if child_subtree_max != K::Int::MAX {
+        if child_subtree_max != K::Int::MAX
+            || !unsafe { node.is_last_child(pos, &self.btree.internal) }
+        {
             let sibling = unsafe {
                 node.value(pos.next(), &self.btree.internal)
                     .assume_init_read()
             };
 
             // We can steal from the sibling if it is more than half-full.
-            let can_steal = unsafe {
-                sibling.key(
-                    if child_is_leaf {
-                        pos!(K::Int::B / 2)
-                    } else {
-                        pos!(K::Int::B / 2 - 1)
-                    },
-                    child_pool(self.btree),
-                )
-            } != K::Int::MAX;
+            let sibling_end = unsafe { sibling.end(child_pool(self.btree)) };
+            let can_steal = sibling_end > pos!(K::Int::B / 2);
 
             if can_steal {
                 unsafe {
@@ -761,6 +781,11 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
                     node.set_key(key, pos, &mut self.btree.internal);
                 }
 
+                unsafe {
+                    child.set_end(pos!(K::Int::B / 2), child_pool(self.btree));
+                    sibling.set_end(sibling_end.prev(), child_pool(self.btree));
+                }
+
                 // Stealing can't cause recursive underflows.
                 None
             } else {
@@ -793,6 +818,8 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
                         child.set_next_leaf(next_leaf, child_pool(self.btree));
                     }
 
+                    child.set_end(pos!(K::Int::B - 1), child_pool(self.btree));
+
                     // The sibling is no longer in the tree, free its node.
                     child_pool(self.btree).free_node(sibling);
 
@@ -801,6 +828,8 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
                     // should hold the maximum key in the sub-tree.
                     node.remove_key(pos, &mut self.btree.internal);
                     node.remove_value(pos.next(), &mut self.btree.internal);
+                    let end = node.end_internal(&self.btree.internal);
+                    node.set_end_internal(end.prev(), &mut self.btree.internal);
                 }
 
                 // Merging may cause the parent node to become under-sized.
@@ -813,25 +842,12 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
             };
 
             // We can steal from the sibling if it is more than half-full.
-            let can_steal = unsafe {
-                sibling.key(
-                    if child_is_leaf {
-                        pos!(K::Int::B / 2)
-                    } else {
-                        pos!(K::Int::B / 2 - 1)
-                    },
-                    child_pool(self.btree),
-                )
-            } != K::Int::MAX;
+            let sibling_end = unsafe { sibling.end(child_pool(self.btree)) };
+            let can_steal = sibling_end > pos!(K::Int::B / 2);
 
             if can_steal {
                 unsafe {
                     // Find the position of the last element in the sibling.
-                    let sibling_end = if child_is_leaf {
-                        sibling.leaf_end(child_pool(self.btree))
-                    } else {
-                        sibling.internal_end(child_pool(self.btree))
-                    };
                     let sibling_last = sibling_end.prev();
 
                     if child_is_leaf {
@@ -913,6 +929,11 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
                     self.stack[height].1 = self.stack[height].1.next();
                 }
 
+                unsafe {
+                    child.set_end(pos!(K::Int::B / 2), child_pool(self.btree));
+                    sibling.set_end(sibling_end.prev(), child_pool(self.btree));
+                }
+
                 // Stealing can't cause recursive underflows.
                 None
             } else {
@@ -946,6 +967,8 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
                         sibling.set_next_leaf(next_leaf, child_pool(self.btree));
                     }
 
+                    sibling.set_end(pos!(K::Int::B - 1), child_pool(self.btree));
+
                     // The child is no longer in the tree, free its node.
                     child_pool(self.btree).free_node(child);
 
@@ -954,6 +977,8 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
                     // should hold the maximum key in the sub-tree.
                     node.remove_key(pos.prev(), &mut self.btree.internal);
                     node.remove_value(pos, &mut self.btree.internal);
+                    let end = node.end_internal(&self.btree.internal);
+                    node.set_end_internal(end.prev(), &mut self.btree.internal);
 
                     // After merging, we need to adjust the cursor position for
                     // the child and parent.
@@ -1050,7 +1075,7 @@ impl<'a, K: BTreeKey, V, A: Allocator> Cursor<'a, K, V, A> {
     pub fn iter(&self) -> Iter<'a, K, V, A> {
         let (node, pos) = self.raw.stack[Height::leaf()];
         Iter {
-            raw: crate::RawIter { node, pos },
+            raw: unsafe { crate::RawIter::new(node, pos, &self.raw.btree.leaf) },
             btree: self.raw.btree,
         }
     }
@@ -1084,6 +1109,7 @@ impl<'a, K: BTreeKey, V, A: Allocator> CursorMut<'a, K, V, A> {
         Self {
             raw: RawCursor {
                 stack: <K::Int as BTreeInteger>::Stack::default(),
+                leaf_end: pos!(0),
                 btree,
             },
         }
@@ -1098,7 +1124,7 @@ impl<'a, K: BTreeKey, V, A: Allocator> CursorMut<'a, K, V, A> {
     /// Returns `true` if the cursor points to the end of the tree.
     #[inline]
     pub fn is_end(&self) -> bool {
-        self.entry().is_none()
+        self.raw.is_end()
     }
 
     /// Returns the key of the element that the cursor is currently pointing to,
@@ -1168,7 +1194,7 @@ impl<'a, K: BTreeKey, V, A: Allocator> CursorMut<'a, K, V, A> {
     pub fn iter(&self) -> Iter<'_, K, V, A> {
         let (node, pos) = self.raw.stack[Height::leaf()];
         Iter {
-            raw: crate::RawIter { node, pos },
+            raw: unsafe { crate::RawIter::new(node, pos, &self.raw.btree.leaf) },
             btree: self.raw.btree,
         }
     }
@@ -1182,7 +1208,7 @@ impl<'a, K: BTreeKey, V, A: Allocator> CursorMut<'a, K, V, A> {
     pub fn iter_mut(&mut self) -> IterMut<'_, K, V, A> {
         let (node, pos) = self.raw.stack[Height::leaf()];
         IterMut {
-            raw: crate::RawIter { node, pos },
+            raw: unsafe { crate::RawIter::new(node, pos, &self.raw.btree.leaf) },
             btree: self.raw.btree,
         }
     }
@@ -1200,7 +1226,7 @@ impl<'a, K: BTreeKey, V, A: Allocator> CursorMut<'a, K, V, A> {
     pub fn into_iter(self) -> Iter<'a, K, V, A> {
         let (node, pos) = self.raw.stack[Height::leaf()];
         Iter {
-            raw: crate::RawIter { node, pos },
+            raw: unsafe { crate::RawIter::new(node, pos, &self.raw.btree.leaf) },
             btree: self.raw.btree,
         }
     }
@@ -1217,7 +1243,7 @@ impl<'a, K: BTreeKey, V, A: Allocator> CursorMut<'a, K, V, A> {
     pub fn into_iter_mut(self) -> IterMut<'a, K, V, A> {
         let (node, pos) = self.raw.stack[Height::leaf()];
         IterMut {
-            raw: crate::RawIter { node, pos },
+            raw: unsafe { crate::RawIter::new(node, pos, &self.raw.btree.leaf) },
             btree: self.raw.btree,
         }
     }
@@ -1310,19 +1336,31 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
         // never deleted.
         debug_assert_eq!(node, NodeRef::zero());
         stack[height] = (NodeRef::zero(), pos!(0));
-        RawCursor { stack, btree }
+        let leaf_end = unsafe { node.end(&btree.leaf) };
+        RawCursor {
+            stack,
+            leaf_end,
+            btree,
+        }
     }
 
     /// Returns a [`RawCursor`] pointing at the first element with key greater
-    /// than `bound`.
+    /// than or equal to `key`, or at the end of the tree if `key` is `None`.
     #[inline]
     fn raw_cursor_at<Ref: Deref<Target = Self>>(
         btree: Ref,
-        key: <K::Int as BTreeInteger>::Raw,
+        key: Option<<K::Int as BTreeInteger>::Raw>,
     ) -> RawCursor<K, V, A, Ref> {
         let stack = <K::Int as BTreeInteger>::Stack::default();
-        let mut cursor = RawCursor { stack, btree };
-        cursor.seek(key);
+        let mut cursor = RawCursor {
+            stack,
+            leaf_end: pos!(0),
+            btree,
+        };
+        match key {
+            Some(key) => cursor.seek(key),
+            None => cursor.seek_end(),
+        }
         cursor
     }
 
@@ -1333,14 +1371,18 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
         Cursor { raw }
     }
 
-    /// Returns a [`Cursor`] pointing at the first element with key greater
-    /// than `bound`.
+    /// Returns a [`Cursor`] positioned according to `bound`.
+    ///
+    /// `Included(key)` selects the first element with key >= `key`, and
+    /// `Excluded(key)` selects the first element with key > `key`.
+    /// `Unbounded`, or a bound with no matching element, selects the end of
+    /// the tree.
     #[inline]
     pub fn cursor_at(&self, bound: Bound<K>) -> Cursor<'_, K, V, A> {
         let key = match bound {
-            Bound::Included(key) => int_from_key(key),
+            Bound::Included(key) => Some(int_from_key(key)),
             Bound::Excluded(key) => K::Int::increment(int_from_key(key)),
-            Bound::Unbounded => K::Int::MAX,
+            Bound::Unbounded => None,
         };
         let raw = Self::raw_cursor_at(self, key);
         Cursor { raw }
@@ -1353,14 +1395,18 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
         CursorMut { raw }
     }
 
-    /// Returns a [`CursorMut`] pointing at the first element with key greater
-    /// than `bound`.
+    /// Returns a [`CursorMut`] positioned according to `bound`.
+    ///
+    /// `Included(key)` selects the first element with key >= `key`, and
+    /// `Excluded(key)` selects the first element with key > `key`.
+    /// `Unbounded`, or a bound with no matching element, selects the end of
+    /// the tree.
     #[inline]
     pub fn cursor_mut_at(&mut self, bound: Bound<K>) -> CursorMut<'_, K, V, A> {
         let key = match bound {
-            Bound::Included(key) => int_from_key(key),
+            Bound::Included(key) => Some(int_from_key(key)),
             Bound::Excluded(key) => K::Int::increment(int_from_key(key)),
-            Bound::Unbounded => K::Int::MAX,
+            Bound::Unbounded => None,
         };
         let raw = Self::raw_cursor_at(self, key);
         CursorMut { raw }

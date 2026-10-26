@@ -7,8 +7,6 @@ differences:
 - Lookups and insertions are 2-4x faster than `BTreeMap`.
 - `BTree` can optionally be used as a multi-map and hold duplicate keys.
 - Keys must be integer types or convertible to integers via the `BTreeKey` trait.
-- The maximum integer value is reserved for internal use and cannot be used
-  by keys.
 - Elements in the tree are ordered by the integer value of the key instead
   of the `Ord` implementation of the keys.
 - Cursors can be used to seek back-and-forth in the tree while inserting or

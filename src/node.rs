@@ -5,39 +5,47 @@
 //!
 //! Common invariants:
 //! - All keys must be initialized.
-//! - `I::MAX` keys must be at the end, after all other keys.
+//! - Unused key slots contain `I::MAX`; live keys may also equal `I::MAX`.
 //! - Node must have at least `B / 2` elements, except the root node.
 //!   - The root node must have at least 2 elements if it is an internal node.
 //! - Nodes can have at most `B - 1` elements.
 //! - This means that the last key is always `I::MAX` and it doesn't hold a
 //!   valid value.
 //!
-//! Notably, it is not a safety violation for non-max keys to be out of order,
+//! Notably, it is not a safety violation for live keys to be out of order,
 //! although it may cause tree operations to behave incorrectly (but safely).
+//!
+//! Key and value operations do not maintain metadata. Callers must initialize
+//! or update `end` and the next-leaf pointer using the metadata setters.
 //!
 //! ## Leaf nodes
 //!
-//! Leaf nodes use a key of `I` and a value of `V`.
+//! Leaf nodes use a key of `I::Raw` and a value of `V`.
 //!
 //! Invariants:
 //! - Each key is tied to the corresponding value.
-//! - A key of `I::MAX` indicates that a value is absent.
+//! - The node length determines which values are present.
 //!
 //! Leaf nodes also hold a `NodeRef` pointing to the next leaf node in the tree.
-//! This `NodeRef` overlaps with the last value, which is always unused except
-//! temporarily during insertion. The last
+//! Its offset is packed with this leaf's length in a metadata word overlapping
+//! the last value, which is unused except temporarily during insertion. The
+//! low seven bits hold the length; the remaining bits hold the next offset.
+//! `NodeRef::INVALID` terminates the list. The first leaf always has offset zero
+//! and can never be the successor of another leaf.
 //!
 //! ## Internal nodes
 //!
-//! Internal nodes use a key of `I` and a value of `NodeRef`.
+//! Internal nodes use a key of `I::Raw` and a value of `NodeRef`.
 //!
 //! Invariants:
 //! - The key of a sub-tree indicates the right-most leaf key in that sub-tree.
 //!   - Safety relies on this being the case even if leaf keys are out of order.
-//! - The last element has a key of `I::MAX`.
+//! - The last live element has a key of `I::MAX`.
 //!   - All later elements are considered absent.
 //!   - Since nodes can only have `B - 1` elements, the last 2 keys must have a
 //!     value of `I::MAX`.
+//! - The unused last value slot stores the length in its low seven bits.
+//!   Its upper bits are cleared after initialization and splitting.
 
 use core::{
     alloc::Layout,
@@ -62,11 +70,25 @@ pub(crate) const MAX_POOL_SIZE: usize = i32::MAX as usize;
 ///
 /// This has the invariant of always being less than B, which allows safe
 /// unchecked indexing within a node.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NodePos<I: BTreeInteger> {
     // Using a u32 internally so each stack entry in a cursor is 8 bytes.
     pos: u32,
     marker: PhantomData<fn() -> I>,
+}
+
+impl<I: BTreeInteger> PartialOrd for NodePos<I> {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<I: BTreeInteger> Ord for NodePos<I> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.pos.cmp(&other.pos)
+    }
 }
 
 /// Helper macro to create a `NodePos` at a constant index.
@@ -166,10 +188,16 @@ impl<I: BTreeInteger> NodePos<I> {
 pub(crate) struct NodeRef(u32);
 
 impl NodeRef {
+    /// Sentinel with the low seven bits clear so it fits in leaf metadata.
+    /// No node can fit at this offset: nodes need more than 128 bytes, and
+    /// pools cannot exceed `u32::MAX` bytes.
+    #[allow(clippy::identity_op)]
+    pub(crate) const INVALID: Self = Self(u32::MAX & !127);
+
     /// Creates a `NodeRef` with a value of 0.
     ///
-    /// This is only meant for use when initializing a stack, it is not a valid
-    /// `NodeRef`.
+    /// This refers to the first leaf in the leaf pool and is also used as a
+    /// placeholder when initializing a stack.
     #[inline]
     pub(crate) const fn zero() -> Self {
         Self(0)
@@ -204,29 +232,87 @@ impl NodeRef {
         }
     }
 
-    /// Returns the end of the elements of a leaf node.
+    /// Returns a pointer to the metadata word overlapping the last value slot.
     ///
     /// # Safety
     ///
     /// `self` must be allocated from `pool`.
     #[inline]
-    pub(crate) unsafe fn leaf_end<I: BTreeInteger, V>(self, pool: &NodePool<I, V>) -> NodePos<I> {
+    unsafe fn metadata_ptr<I: BTreeInteger, V>(self, pool: &NodePool<I, V>) -> NonNull<u32> {
         pool.validate_noderef(self);
-        unsafe { I::search(self.keys(pool), I::MAX) }
+        let offset = const { node_layout::<I, V>().2 };
+        unsafe { pool.ptr.byte_add(self.0 as usize + offset).cast() }
     }
 
-    /// Returns the end of the elements of an internal node.
+    /// Returns the position of the first unused slot.
     ///
     /// # Safety
     ///
-    /// `self` must be allocated from `pool` and must have at least 1 element.
+    /// `self` must have initialized metadata in `pool`.
     #[inline]
-    pub(crate) unsafe fn internal_end<I: BTreeInteger, V>(
+    pub(crate) unsafe fn end<I: BTreeInteger, V>(self, pool: &NodePool<I, V>) -> NodePos<I> {
+        unsafe { NodePos::new_unchecked((self.metadata_ptr(pool).read() & 127) as usize) }
+    }
+
+    /// Changes the end position, preserving the next-leaf offset.
+    ///
+    /// # Safety
+    ///
+    /// Metadata must be initialized and the entries before `end` must
+    /// be live.
+    #[inline]
+    pub(crate) unsafe fn set_end<I: BTreeInteger, V>(
         self,
-        pool: &NodePool<I, V>,
+        end: NodePos<I>,
+        pool: &mut NodePool<I, V>,
+    ) {
+        unsafe {
+            let ptr = self.metadata_ptr(pool);
+            ptr.write((ptr.read() & !127) | end.pos);
+        }
+    }
+
+    /// Returns the end position of an internal node without masking metadata.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be initialized in `pool`, with the upper metadata bits
+    /// cleared by `set_end_internal` after initialization or splitting.
+    #[inline]
+    pub(crate) unsafe fn end_internal<I: BTreeInteger>(
+        self,
+        pool: &NodePool<I, NodeRef>,
     ) -> NodePos<I> {
-        pool.validate_noderef(self);
-        unsafe { I::search(self.keys(pool), I::MAX).next() }
+        unsafe { NodePos::new_unchecked(self.metadata_ptr(pool).read() as usize) }
+    }
+
+    /// Initializes or updates internal metadata, clearing the upper bits.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be an internal node allocated in `pool`, and the entries
+    /// before `end` must be live.
+    #[inline]
+    pub(crate) unsafe fn set_end_internal<I: BTreeInteger>(
+        self,
+        end: NodePos<I>,
+        pool: &mut NodePool<I, NodeRef>,
+    ) {
+        unsafe { self.metadata_ptr(pool).write(end.pos) };
+    }
+
+    /// Tests whether a live internal position is the last child.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be initialized and `pos` must refer to a live child.
+    #[inline]
+    pub(crate) unsafe fn is_last_child<I: BTreeInteger>(
+        self,
+        pos: NodePos<I>,
+        pool: &NodePool<I, NodeRef>,
+    ) -> bool {
+        unsafe { pos == self.end_internal(pool).prev() }
     }
 
     /// Returns a reference to all the keys in this node.
@@ -296,25 +382,17 @@ impl NodeRef {
         unsafe { self.values_ptr(pool).add(pos.index()).as_mut() }
     }
 
-    /// Returns a `NodeRef` pointing to the next leaf node in the tree.
+    /// Returns the next leaf node, or `NodeRef::INVALID` for the last leaf.
     ///
     /// This overlaps with the last value in the node.
     ///
     /// # Safety
     ///
-    /// `self` must be allocated from `pool`.
+    /// `self` must have initialized metadata in `pool`.
     #[inline]
-    pub(crate) unsafe fn next_leaf<I: BTreeInteger, V>(
-        self,
-        pool: &NodePool<I, V>,
-    ) -> Option<NodeRef> {
-        pool.validate_noderef(self);
-        let next_leaf_offset = const { node_layout::<I, V>().2 };
-        let next_leaf = unsafe {
-            let ptr = pool.ptr.byte_add(self.0 as usize);
-            ptr.byte_add(next_leaf_offset).cast::<NodeRef>().read()
-        };
-        (next_leaf.0 != !0).then_some(next_leaf)
+    pub(crate) unsafe fn next_leaf<I: BTreeInteger, V>(self, pool: &NodePool<I, V>) -> NodeRef {
+        let offset = unsafe { self.metadata_ptr(pool).read() & !127 };
+        NodeRef(offset)
     }
 
     /// Sets the `NodeRef` pointing to the next leaf node in the tree.
@@ -323,20 +401,37 @@ impl NodeRef {
     ///
     /// # Safety
     ///
-    /// `self` must be allocated from `pool`.
+    /// `self` must have initialized metadata in `pool`. `next_leaf` must be
+    /// `NodeRef::INVALID` or refer to a leaf other than the first leaf.
     #[inline]
     pub(crate) unsafe fn set_next_leaf<I: BTreeInteger, V>(
         self,
-        next_leaf: Option<NodeRef>,
+        next_leaf: NodeRef,
         pool: &mut NodePool<I, V>,
     ) {
-        pool.validate_noderef(self);
-        let next_leaf_offset = const { node_layout::<I, V>().2 };
+        let end = unsafe { self.end(pool) };
+        unsafe { self.set_metadata(end, next_leaf, pool) };
+    }
+
+    /// Initializes or restores leaf metadata, including after insertion overwrites it.
+    /// Internal nodes use `set_end_internal` instead.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be allocated in `pool`, with `end.index()` live entries.
+    /// `next_leaf` must be `NodeRef::INVALID` or refer to a leaf other than the
+    /// first leaf.
+    #[inline]
+    pub(crate) unsafe fn set_metadata<I: BTreeInteger, V>(
+        self,
+        end: NodePos<I>,
+        next_leaf: NodeRef,
+        pool: &mut NodePool<I, V>,
+    ) {
+        debug_assert_ne!(next_leaf.0, 0);
+        debug_assert_eq!(next_leaf.0 & 127, 0);
         unsafe {
-            let ptr = pool.ptr.byte_add(self.0 as usize);
-            ptr.byte_add(next_leaf_offset)
-                .cast::<NodeRef>()
-                .write(next_leaf.unwrap_or(NodeRef(!0)));
+            self.metadata_ptr(pool).write(next_leaf.0 | end.pos);
         }
     }
 
@@ -375,8 +470,8 @@ impl NodeRef {
     /// The value previously in the last slot are discarded without being
     /// dropped.
     ///
-    /// If `node_size == I::B` then this will clobber the next leaf pointer in
-    /// the node.
+    /// If `node_size == I::B` then this may clobber the metadata. The caller
+    /// must restore it after insertion or splitting.
     ///
     /// # Safety
     ///
@@ -447,10 +542,13 @@ impl NodeRef {
     /// replacing the keys with `I::MAX`.
     ///
     /// The second half of `dest` is initialized with `I::MAX`.
+    /// Metadata is not updated: the caller must initialize it for both nodes
+    /// with `set_metadata` or `set_end_internal` before reading it.
     ///
     /// # Safety
     ///
-    /// `self` and `dest` must be allocated from `pool`.
+    /// `self` and `dest` must be distinct nodes allocated from `pool`, and all
+    /// keys in `self` must be initialized.
     #[allow(clippy::needless_pass_by_value)]
     #[inline]
     pub(crate) unsafe fn split_into<I: BTreeInteger, V>(
@@ -486,9 +584,9 @@ impl NodeRef {
     ///
     /// # Safety
     ///
-    /// `self` and `src` must be allocated from `pool`.
+    /// `self` and `src` must be distinct nodes allocated from `pool`.
     ///
-    /// `offset.len() + count <= I::B`
+    /// `offset.index() + count <= I::B`
     #[allow(clippy::needless_pass_by_value)]
     #[inline]
     pub(crate) unsafe fn merge_from<I: BTreeInteger, V>(
@@ -511,12 +609,15 @@ impl NodeRef {
 
 /// A `NodeRef` pointing to a node whose keys have not been initialized yet.
 ///
-/// The node must be initialized with `split_into` or `init_keys`.
+/// The keys must be initialized with `split_into` or `init_keys`. The caller
+/// must initialize metadata separately with `set_metadata` or `set_end_internal`.
 #[derive(Debug)]
 pub(crate) struct UninitNodeRef(NodeRef);
 
 impl UninitNodeRef {
-    /// Initializes all keys of the node with `I::MAX`.
+    /// Initializes all keys to `I::MAX`, leaving values and metadata untouched.
+    /// The caller must initialize metadata with `set_metadata` or
+    /// `set_end_internal` before reading it.
     ///
     /// # Safety
     ///
@@ -536,12 +637,13 @@ impl UninitNodeRef {
 /// Returns :
 /// - the layout of a node with key `I` and value `V`.
 /// - the offset of the value array within the node.
-/// - the offset of the next leaf pointer within the node.
+/// - the offset of the metadata word within the node.
 #[inline]
 pub(crate) const fn node_layout<I: BTreeInteger, V>() -> (Layout, usize, usize) {
     // We require nodes to have at least 4 elements, and the number of elements
     // must be a multiple of 2.
     const { assert!(I::B >= 4) };
+    const { assert!(I::B <= 128) };
     const { assert!(I::B.is_multiple_of(2)) };
 
     // The node layout is effectively:
@@ -550,7 +652,7 @@ pub(crate) const fn node_layout<I: BTreeInteger, V>() -> (Layout, usize, usize) 
     //     values: [MaybeUninit<V>; I::B - 1],
     //     last_value: union {
     //          MaybeUninit<V>,
-    //          NodeRef,
+    //          u32, // length and next-leaf offset
     //     },
     // }
     //
@@ -572,7 +674,7 @@ pub(crate) const fn node_layout<I: BTreeInteger, V>() -> (Layout, usize, usize) 
     let Ok((node, values_offset)) = keys.extend(values) else {
         panic!("Could not calculate node layout");
     };
-    let Ok((node, next_leaf_offset)) = node.extend(last_value) else {
+    let Ok((node, metadata_offset)) = node.extend(last_value) else {
         panic!("Could not calculate node layout");
     };
 
@@ -581,7 +683,7 @@ pub(crate) const fn node_layout<I: BTreeInteger, V>() -> (Layout, usize, usize) 
     let Ok(layout) = node.align_to(4) else {
         panic!("Could not calculate node layout");
     };
-    (layout.pad_to_align(), values_offset, next_leaf_offset)
+    (layout.pad_to_align(), values_offset, metadata_offset)
 }
 
 /// Memory pool for allocating nodes with key `I` and value `V`.
@@ -767,13 +869,12 @@ impl<I: BTreeInteger, V> NodePool<I, V> {
 #[cfg(test)]
 mod tests {
     use allocator_api2::alloc::Global;
-    use nonmax::NonMaxU32;
 
     use super::NodePool;
 
     #[test]
     fn smoke() {
-        let mut pool = NodePool::<NonMaxU32, u32>::new();
+        let mut pool = NodePool::<u32, u32>::new();
         let node = unsafe { pool.alloc_node(&Global).0 };
         let node2 = unsafe { pool.alloc_node(&Global).0 };
         unsafe {
