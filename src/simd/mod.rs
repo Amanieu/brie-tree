@@ -37,15 +37,17 @@ cfg_if! {
         mod sse2;
     } else if #[cfg(all(
         target_arch = "aarch64",
+        target_endian = "little",
         target_feature = "sve",
     ))] {
-        // AArch64 SVE
+        // Little-endian AArch64 SVE
         mod sve;
     } else if #[cfg(all(
         target_arch = "aarch64",
+        target_endian = "little",
         target_feature = "neon",
     ))] {
-        // AArch64 NEON
+        // Little-endian AArch64 NEON
         mod neon;
     } else if #[cfg(all(
         any(target_arch = "riscv32", target_arch = "riscv64"),
