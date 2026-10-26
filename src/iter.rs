@@ -3,7 +3,7 @@ use core::{
     iter::FusedIterator,
     mem::{self, ManuallyDrop},
     ops::{Bound, RangeBounds},
-    ptr::NonNull,
+    ptr::{self, NonNull},
 };
 
 use allocator_api2::alloc::{Allocator, Global};
@@ -195,20 +195,34 @@ impl<K: BTreeKey, V, A: Allocator> Iterator for IntoIter<K, V, A> {
 impl<K: BTreeKey, V, A: Allocator> Drop for IntoIter<K, V, A> {
     #[inline]
     fn drop(&mut self) {
-        // Ensure all remaining elements are dropped.
-        if mem::needs_drop::<V>() {
-            while let Some((_key, value_ptr)) = unsafe { self.raw.next(&self.btree.leaf) } {
+        struct DropGuard<'a, K: BTreeKey, V, A: Allocator> {
+            btree: &'a mut BTree<K, V, A>,
+        }
+
+        impl<K: BTreeKey, V, A: Allocator> Drop for DropGuard<'_, K, V, A> {
+            #[inline]
+            fn drop(&mut self) {
                 unsafe {
-                    value_ptr.drop_in_place();
+                    self.btree.internal.clear_and_free(&self.btree.alloc);
+                    self.btree.leaf.clear_and_free(&self.btree.alloc);
+                    ptr::drop_in_place(&mut self.btree.alloc);
                 }
             }
         }
 
-        // Then release the allocations for the tree without dropping elements.
-        unsafe {
-            let btree = &mut *self.btree;
-            btree.internal.clear_and_free(&btree.alloc);
-            btree.leaf.clear_and_free(&btree.alloc);
+        // Release the pools and allocator even if a value destructor panics.
+        // Unvisited values are discarded without running their destructors.
+        let guard = DropGuard {
+            btree: &mut self.btree,
+        };
+
+        // Ensure all remaining elements are dropped.
+        if mem::needs_drop::<V>() {
+            while let Some((_key, value_ptr)) = unsafe { self.raw.next(&guard.btree.leaf) } {
+                unsafe {
+                    value_ptr.drop_in_place();
+                }
+            }
         }
     }
 }

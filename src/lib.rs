@@ -218,21 +218,33 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
 impl<K: BTreeKey, V, A: Allocator> Drop for BTree<K, V, A> {
     #[inline]
     fn drop(&mut self) {
-        // Drop values. We don't need to modify the keys since we're about to
-        // free the nodes anyways.
-        if mem::needs_drop::<V>() {
-            let mut iter = self.raw_iter();
-            while let Some((_key, value_ptr)) = unsafe { iter.next(&self.leaf) } {
+        struct DropGuard<'a, K: BTreeKey, V, A: Allocator> {
+            btree: &'a mut BTree<K, V, A>,
+        }
+
+        impl<K: BTreeKey, V, A: Allocator> Drop for DropGuard<'_, K, V, A> {
+            #[inline]
+            fn drop(&mut self) {
                 unsafe {
-                    value_ptr.drop_in_place();
+                    self.btree.internal.clear_and_free(&self.btree.alloc);
+                    self.btree.leaf.clear_and_free(&self.btree.alloc);
                 }
             }
         }
 
-        // Release all allocated memory
-        unsafe {
-            self.internal.clear_and_free(&self.alloc);
-            self.leaf.clear_and_free(&self.alloc);
+        // Release the pools even if a value destructor panics. Unvisited values
+        // are discarded without running their destructors in that case.
+        let guard = DropGuard { btree: self };
+
+        // Drop values. We don't need to modify the keys since we're about to
+        // free the nodes anyways.
+        if mem::needs_drop::<V>() {
+            let mut iter = guard.btree.raw_iter();
+            while let Some((_key, value_ptr)) = unsafe { iter.next(&guard.btree.leaf) } {
+                unsafe {
+                    value_ptr.drop_in_place();
+                }
+            }
         }
     }
 }
