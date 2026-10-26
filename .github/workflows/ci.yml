@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        channel: [1.88, nightly]
+        channel: [1.98, nightly]
         target:
           - tuple: i586-unknown-linux-gnu
           - tuple: x86_64-unknown-linux-gnu

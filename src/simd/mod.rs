@@ -3,59 +3,64 @@
 use core::cmp::Ordering;
 use core::{fmt::Debug, hint};
 
-use cfg_if::cfg_if;
-
 use crate::int::KEYS_BYTES;
 
-cfg_if! {
-    if #[cfg(all(
+cfg_select! {
+    all(
         any(target_arch = "x86", target_arch = "x86_64"),
         target_feature = "avx512bw",
         target_feature = "popcnt",
-    ))] {
+    ) => {
         // x86-64-v4: AVX512F + AVX512BW
         mod avx512;
-    } else if #[cfg(all(
+    }
+    all(
         any(target_arch = "x86", target_arch = "x86_64"),
         target_feature = "avx2",
         target_feature = "popcnt",
-    ))] {
+    ) => {
         // x86-64-v3: AVX2 + POPCNT
         mod avx2;
-    } else if #[cfg(all(
+    }
+    all(
         any(target_arch = "x86", target_arch = "x86_64"),
         target_feature = "sse2",
         target_feature = "popcnt",
-    ))] {
+    ) => {
         // x86-64-v2: SSE2 + POPCNT
         mod sse2_popcnt;
-    } else if #[cfg(all(
+    }
+    all(
         any(target_arch = "x86", target_arch = "x86_64"),
         target_feature = "sse2",
-    ))] {
+    ) => {
         // x86-64-v1: SSE2
         mod sse2;
-    } else if #[cfg(all(
+    }
+    all(
         target_arch = "aarch64",
         target_endian = "little",
         target_feature = "sve",
-    ))] {
+    ) => {
         // Little-endian AArch64 SVE
         mod sve;
-    } else if #[cfg(all(
+    }
+    all(
         target_arch = "aarch64",
         target_endian = "little",
         target_feature = "neon",
-    ))] {
+    ) => {
         // Little-endian AArch64 NEON
         mod neon;
-    } else if #[cfg(all(
+    }
+    all(
         any(target_arch = "riscv32", target_arch = "riscv64"),
         target_feature = "v",
-    ))] {
+    ) => {
         // RISC-V RVV
         mod rvv;
-    } else {
+    }
+    _ => {
         // Default fallback implementation using unrolled binary search
         impl SimdSearch for u8 {}
         impl SimdSearch for u16 {}

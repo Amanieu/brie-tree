@@ -1,4 +1,4 @@
-use core::ops::Bound;
+use core::{assert_matches, ops::Bound};
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::atomic::{AtomicUsize, Ordering},
@@ -379,12 +379,12 @@ fn insert_before_preserves_cursor_position() {
 
     let mut cursor = btree.cursor_mut_at(Bound::Included(10));
     cursor.insert_before(5, 5);
-    assert_eq!(cursor.entry().map(|(k, _v)| k), Some(10));
+    assert_matches!(cursor.entry(), Some((10, _)));
     drop(cursor);
 
     let mut cursor = btree.cursor_mut_at(Bound::Unbounded);
     cursor.insert_before(30, 30);
-    assert_eq!(cursor.entry().map(|(k, _v)| k), None);
+    assert_matches!(cursor.entry(), None);
     drop(cursor);
 
     btree.check_invariants(true);
@@ -408,7 +408,7 @@ fn insert_before_preserves_cursor_position_after_split() {
 
     let mut cursor = btree.cursor_mut_at(Bound::Unbounded);
     cursor.insert_before(node_len as u32 * 2, node_len as u32 * 2);
-    assert_eq!(cursor.entry().map(|(k, _v)| k), None);
+    assert_matches!(cursor.entry(), None);
     drop(cursor);
 
     btree.check_invariants(true);
@@ -440,7 +440,7 @@ fn remove() {
             let value = entry.unwrap();
             assert_eq!(value, key);
         } else {
-            assert!(entry.is_none());
+            assert_matches!(entry, None);
         }
         btree.check_invariants(true);
 
@@ -517,7 +517,7 @@ fn clear_with_panicking_value() {
     }
 
     let result = catch_unwind(AssertUnwindSafe(|| btree.clear()));
-    assert!(result.is_err());
+    assert_matches!(result, Err(_));
     assert!(btree.is_empty());
     btree.check_invariants(true);
     assert_eq!(

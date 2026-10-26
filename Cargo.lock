@@ -34,7 +34,6 @@ name = "brie-tree"
 version = "0.1.2"
 dependencies = [
  "allocator-api2",
- "cfg-if",
  "divan",
  "rand",
 ]

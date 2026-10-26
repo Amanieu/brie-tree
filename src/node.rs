@@ -739,7 +739,8 @@ impl<I: BTreeInteger, V> NodePool<I, V> {
 
         if self.capacity == 0 {
             // Allocate space for 2 nodes for the initial allocation.
-            let new_layout = Layout::from_size_align(node_layout.size() * 2, node_layout.align())
+            let (new_layout, _) = node_layout
+                .repeat(2)
                 .expect("exceeded BTree maximum allocation size");
             assert!(
                 new_layout.size() <= MAX_POOL_SIZE,
@@ -755,11 +756,9 @@ impl<I: BTreeInteger, V> NodePool<I, V> {
                 Layout::from_size_align_unchecked(self.capacity as usize, node_layout.align())
             };
 
-            // This multiplication cannot overflow because the capacity in a
-            // layout cannot exceed `isize::MAX`.
-            let new_layout =
-                Layout::from_size_align(self.capacity as usize * 2, node_layout.align())
-                    .expect("exceeded BTree maximum allocation size");
+            let (new_layout, _) = old_layout
+                .repeat(2)
+                .expect("exceeded BTree maximum allocation size");
             assert!(
                 new_layout.size() <= MAX_POOL_SIZE,
                 "exceeded BTree maximum allocation size"
