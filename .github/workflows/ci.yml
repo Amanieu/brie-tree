@@ -51,11 +51,12 @@ jobs:
       with:
         target: ${{ matrix.target.tuple }}
     - name: Test
-      run: cargo test --features internal_benches
+      # Keep target-specific RUSTFLAGS out of host build scripts and proc macros.
+      run: cargo test --target ${{ matrix.target.tuple }} --features internal_benches
       env:
         RUSTFLAGS: -D warnings ${{ matrix.target.rustflags }}
     - name: Run fuzz target for 60s
-      run: cargo fuzz run btree -s none -- -max_total_time=60
+      run: cargo fuzz run btree --target ${{ matrix.target.tuple }} -s none -- -max_total_time=60
       env:
         RUSTFLAGS: -D warnings ${{ matrix.target.rustflags }}
 
