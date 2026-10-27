@@ -59,6 +59,7 @@ enum Action<Key, Value> {
     Range(Bound<Key>, Bound<Key>),
     Cursor(Option<Bound<Key>>, Vec<CursorAction>),
     CursorMut(Option<Bound<Key>>, Vec<CursorMutAction<Key, Value>>),
+    AppendSorted(Vec<(Key, Value)>),
 }
 
 #[derive(Arbitrary, Debug)]
@@ -121,6 +122,18 @@ fn run<
                     btree.insert(key, value);
                     let index = vec.partition_point(|&(k, _v)| k < key);
                     vec.insert(index, (key, value));
+                }
+                Action::AppendSorted(mut entries) => {
+                    // Preserve every generated entry while making the batch a
+                    // valid sorted suffix, including duplicates of the last key.
+                    if let Some(&(last, _)) = vec.last() {
+                        for (key, _) in &mut entries {
+                            *key = (*key).max(last);
+                        }
+                    }
+                    entries.sort_by_key(|&(key, _)| key);
+                    btree.append_sorted(entries.iter().copied());
+                    vec.extend(entries);
                 }
                 Action::Get(key) => {
                     let value = btree.get(key);

@@ -508,33 +508,7 @@ impl<K: BTreeKey, V, A: Allocator> RawCursor<K, V, A, &'_ mut BTree<K, V, A>> {
 
         // If we reached the root of the tree then we need to add a new level to
         // the tree and create a new root node.
-        let new_uninit_root = unsafe { self.btree.internal.alloc_node(&self.btree.alloc) };
-
-        // The new root only contains 2 elements: the original root node and the
-        // newly created split node. The first key holds the maximum key in the
-        // left sub-tree; the second key stays MAX.
-        let new_root;
-        unsafe {
-            new_root = new_uninit_root.init_keys(&mut self.btree.internal);
-            new_root.set_key(mid_key, pos!(0), &mut self.btree.internal);
-            new_root
-                .value_mut(pos!(0), &mut self.btree.internal)
-                .write(self.btree.root);
-            new_root
-                .value_mut(pos!(1), &mut self.btree.internal)
-                .write(new_node);
-            new_root.set_end_internal(pos!(2), &mut self.btree.internal);
-        }
-        self.btree.root = new_root;
-
-        // Increment the height of the tree. The `expect` should never fail here
-        // since we calculated the maximum possible height for the tree
-        // statically as `Height::max`.
-        self.btree.height = self
-            .btree
-            .height
-            .up(Height::max())
-            .expect("exceeded maximum height");
+        let new_root = unsafe { self.btree.push_root(mid_key, new_node) };
 
         // Set up the new level in the cursor stack.
         let pos = if in_right_split { pos!(1) } else { pos!(0) };

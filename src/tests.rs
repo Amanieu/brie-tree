@@ -14,6 +14,115 @@ use crate::{
     stack::Height,
 };
 
+#[test]
+fn from_sorted_iter_and_clone() {
+    for len in [0, 1, 7, 8, 49, 50, 400] {
+        let entries: Vec<_> = (0..len).map(|i| (i as u128 / 3, i.to_string())).collect();
+        let tree = BTree::from_sorted_iter(entries.clone());
+        let allocated = BTree::from_sorted_iter_in(entries.clone(), allocator_api2::alloc::Global);
+        let cloned = tree.clone();
+        for tree in [&tree, &allocated, &cloned] {
+            tree.check_invariants(true);
+            assert!(
+                tree.iter()
+                    .eq(entries.iter().map(|(key, value)| (*key, value)))
+            );
+        }
+    }
+}
+
+#[test]
+fn append_sorted_bulk() {
+    for len in 0..600 {
+        let mut tree = BTree::<u128, usize>::new();
+        tree.append_sorted((0..len).map(|i| (i as u128 / 3, i)));
+        tree.check_invariants(true);
+        assert!(
+            tree.iter()
+                .map(|(k, &v)| (k, v))
+                .eq((0..len).map(|i| (i as u128 / 3, i)))
+        );
+    }
+
+    let mut tree = BTree::<i32, i32>::new();
+    for i in (-100..0).rev() {
+        tree.insert(i, i);
+    }
+    for batch in 0..100 {
+        tree.append_sorted((batch * 23..(batch + 1) * 23).map(|i| (i, i)));
+        tree.check_invariants(true);
+    }
+    assert!(
+        tree.iter()
+            .map(|(k, &v)| (k, v))
+            .eq((-100..2300).map(|i| (i, i)))
+    );
+    for i in -100..2300 {
+        assert_eq!(tree.remove(i), Some(i));
+        tree.check_invariants(true);
+    }
+}
+
+#[test]
+fn append_sorted_extrema() {
+    fn check<K: BTreeKey>(key: K) {
+        let mut tree = BTree::new();
+        let len = K::Int::B * K::Int::B + 1;
+        tree.append_sorted((0..len).map(|i| (key, i)));
+        tree.check_invariants(true);
+        assert!(tree.values().copied().eq(0..len));
+        let mut node = NodeRef::zero();
+        let mut leaves = 0;
+        while node != NodeRef::INVALID {
+            leaves += 1;
+            node = unsafe { node.next_leaf(&tree.leaf) };
+        }
+        assert_eq!(leaves, len.div_ceil(K::Int::B - 1));
+    }
+    check(u8::MAX);
+    check(u128::MAX);
+    check(i8::MIN);
+    check(i128::MIN);
+}
+
+#[test]
+fn append_sorted_unwind() {
+    struct Value<'a>(&'a core::cell::Cell<usize>);
+    impl Drop for Value<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+    for len in 0..400 {
+        let drops = core::cell::Cell::new(0);
+        let mut tree = BTree::<u128, _>::new();
+        tree.insert(0, Value(&drops));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            tree.append_sorted((0..).map(|i| {
+                assert_ne!(i, len, "iterator panic");
+                (i as u128, Value(&drops))
+            }));
+        }));
+        assert!(result.is_err());
+        tree.check_invariants(true);
+        assert_eq!(tree.values().count(), len + 1);
+        drop(tree);
+        assert_eq!(drops.get(), len + 1);
+    }
+}
+
+#[test]
+fn append_sorted_unordered() {
+    let mut tree = BTree::new();
+    tree.insert(u128::MAX, ());
+    // Incorrect ordering must not invalidate the structural invariants, even
+    // when appending creates new levels and repairs underfull nodes.
+    for len in 0..100 {
+        tree.append_sorted((0..len).rev().map(|key| (key, ())));
+        tree.check_invariants(false);
+    }
+}
+
 impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
     fn check_invariants(&self, assert_sorted: bool) {
         let mut last_leaf = None;

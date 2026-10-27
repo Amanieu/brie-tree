@@ -14,6 +14,7 @@ use stack::Height;
 #[macro_use]
 mod node;
 
+mod append;
 mod cursor;
 mod int;
 mod iter;
@@ -89,6 +90,19 @@ impl<K: BTreeKey, V> BTree<K, V, Global> {
     pub fn new() -> Self {
         Self::new_in(Global)
     }
+
+    /// Creates a new [`BTree`] from sorted entries, preserving duplicate keys
+    /// and their input order.
+    ///
+    /// Keys must be in nondecreasing order by their integer values. Violating
+    /// this invariant is safe but may cause other operations to return
+    /// incorrect results or panic.
+    ///
+    /// Uses [`BTree::append_sorted`] to build the tree efficiently.
+    #[inline]
+    pub fn from_sorted_iter(iter: impl IntoIterator<Item = (K, V)>) -> Self {
+        Self::from_sorted_iter_in(iter, Global)
+    }
 }
 
 impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
@@ -109,6 +123,21 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
         out
     }
 
+    /// Creates a new [`BTree`] from sorted entries with the given allocator,
+    /// preserving duplicate keys and their input order.
+    ///
+    /// Keys must be in nondecreasing order by their integer values. Violating
+    /// this invariant is safe but may cause other operations to return
+    /// incorrect results or panic.
+    ///
+    /// Uses [`BTree::append_sorted`] to build the tree efficiently.
+    #[inline]
+    pub fn from_sorted_iter_in(iter: impl IntoIterator<Item = (K, V)>, alloc: A) -> Self {
+        let mut tree = Self::new_in(alloc);
+        tree.append_sorted(iter);
+        tree
+    }
+
     /// Initializes the root node to the leaf node at offset zero.
     #[inline]
     fn init_root(&mut self, root: UninitNodeRef) {
@@ -116,6 +145,48 @@ impl<K: BTreeKey, V, A: Allocator> BTree<K, V, A> {
         unsafe { root.set_metadata(pos!(0), NodeRef::INVALID, &mut self.leaf) };
         debug_assert_eq!(root, NodeRef::zero());
         self.root = NodeRef::zero();
+    }
+
+    /// Adds a root whose children are the old root and `right`, returning it.
+    ///
+    /// # Safety
+    ///
+    /// The old root and `right` must be disjoint, initialized subtrees of the
+    /// current height, allocated from this tree's pools. `left_max` must be the
+    /// old root's rightmost leaf key. Leaf links must already connect the two
+    /// subtrees. Underfull nodes are permitted during bulk loading, but the
+    /// caller must restore their occupancy before exposing the tree.
+    #[inline]
+    unsafe fn push_root(
+        &mut self,
+        left_max: <K::Int as BTreeInteger>::Raw,
+        right: NodeRef,
+    ) -> NodeRef {
+        let new_uninit_root = unsafe { self.internal.alloc_node(&self.alloc) };
+
+        // The new root only contains 2 elements: the original root node and the
+        // new right node. The first key holds the maximum key in the
+        // left sub-tree; the second key stays MAX.
+        let new_root;
+        unsafe {
+            new_root = new_uninit_root.init_keys(&mut self.internal);
+            new_root.set_key(left_max, pos!(0), &mut self.internal);
+            new_root
+                .value_mut(pos!(0), &mut self.internal)
+                .write(self.root);
+            new_root.value_mut(pos!(1), &mut self.internal).write(right);
+            new_root.set_end_internal(pos!(2), &mut self.internal);
+        }
+        self.root = new_root;
+
+        // Increment the height of the tree. The `expect` should never fail here
+        // since we calculated the maximum possible height for the tree
+        // statically as `Height::max`.
+        self.height = self
+            .height
+            .up(Height::max())
+            .expect("exceeded maximum height");
+        new_root
     }
 
     /// Clears the map, removing all elements.
@@ -270,9 +341,10 @@ impl<K: BTreeKey, V, A: Allocator> Extend<(K, V)> for BTree<K, V, A> {
 impl<K: BTreeKey, V: Clone, A: Allocator + Clone> Clone for BTree<K, V, A> {
     #[inline]
     fn clone(&self) -> Self {
-        let mut btree = BTree::new_in(self.alloc.clone());
-        btree.extend(self.iter());
-        btree
+        Self::from_sorted_iter_in(
+            self.iter().map(|(key, value)| (key, value.clone())),
+            self.alloc.clone(),
+        )
     }
 }
 

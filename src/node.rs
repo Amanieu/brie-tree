@@ -39,7 +39,7 @@
 //!
 //! Invariants:
 //! - The key of a sub-tree indicates the right-most leaf key in that sub-tree.
-//!   - Safety relies on this being the case even if leaf keys are out of order.
+//!   - This is the case even if leaf keys are out of order.
 //! - The last live element has a key of `I::MAX`.
 //!   - All later elements are considered absent.
 //!   - Since nodes can only have `B - 1` elements, the last 2 keys must have a
@@ -577,6 +577,48 @@ impl NodeRef {
             .fill(MaybeUninit::new(I::MAX));
         }
         dest.0
+    }
+
+    /// Moves `count` entries starting at `src_offset` to the front of `dest`.
+    /// Shifts `count` destination slots, including any unused ones, to make
+    /// room.
+    ///
+    /// Vacated keys are replaced with `I::MAX`. Metadata is not updated;
+    /// callers must update both lengths and handle internal-node MAX sentinels.
+    ///
+    /// # Safety
+    ///
+    /// `self` and `dest` must be distinct nodes allocated from `pool`, with all
+    /// keys initialized. `self` must have `src_offset.index() + count` live
+    /// entries and `dest` must have at most `count` live entries. `2 * count <=
+    /// I::B - 1` so the shift does not touch metadata.
+    #[inline]
+    pub(crate) unsafe fn transfer_suffix_to<I: BTreeInteger, V>(
+        self,
+        dest: NodeRef,
+        src_offset: NodePos<I>,
+        count: usize,
+        pool: &mut NodePool<I, V>,
+    ) {
+        unsafe {
+            // Shift the elements in the destination to make space.
+            dest.keys_ptr(pool)
+                .copy_to_nonoverlapping(dest.keys_ptr(pool).add(count), count);
+            dest.values_ptr(pool)
+                .copy_to_nonoverlapping(dest.values_ptr(pool).add(count), count);
+
+            // Transfer the suffix to the destination.
+            self.keys_ptr(pool)
+                .add(src_offset.index())
+                .copy_to_nonoverlapping(dest.keys_ptr(pool), count);
+            self.values_ptr(pool)
+                .add(src_offset.index())
+                .copy_to_nonoverlapping(dest.values_ptr(pool), count);
+
+            // Back-fill the suffix keys with MAX now that they have been moved.
+            slice::from_raw_parts_mut(self.keys_ptr(pool).add(src_offset.index()).as_ptr(), count)
+                .fill(I::MAX);
+        }
     }
 
     /// Copies the first `count` elements of `src` and appends them to `self` at
