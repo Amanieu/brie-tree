@@ -524,12 +524,10 @@ fn insert_before_preserves_cursor_position() {
     let mut cursor = btree.cursor_mut_at(Bound::Included(10));
     cursor.insert_before(5, 5);
     assert_matches!(cursor.entry(), Some((10, _)));
-    drop(cursor);
 
     let mut cursor = btree.cursor_mut_at(Bound::Unbounded);
     cursor.insert_before(30, 30);
     assert_matches!(cursor.entry(), None);
-    drop(cursor);
 
     btree.check_invariants(true);
     assert_keys_values(&btree, &[0, 5, 10, 20, 30]);
@@ -548,12 +546,10 @@ fn insert_before_preserves_cursor_position_after_split() {
     let mut cursor = btree.cursor_mut_at(Bound::Included(successor));
     cursor.insert_before(successor_index * 2 - 1, successor_index * 2 - 1);
     assert_eq!(cursor.entry().map(|(k, _v)| k), Some(successor));
-    drop(cursor);
 
     let mut cursor = btree.cursor_mut_at(Bound::Unbounded);
     cursor.insert_before(node_len as u32 * 2, node_len as u32 * 2);
     assert_matches!(cursor.entry(), None);
-    drop(cursor);
 
     btree.check_invariants(true);
     let mut expected: Vec<_> = (0..node_len as u32).map(|i| i * 2).collect();
