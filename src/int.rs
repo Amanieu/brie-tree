@@ -165,6 +165,7 @@ impl_int! {
     u32 => i32,
     u64 => i64,
     u128 => i128,
+    usize => isize,
     i8 => u8,
     i16 => u16,
     i32 => u32,

@@ -48,6 +48,7 @@ impl_key! {
     i32,
     i64,
     i128,
+    usize,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -90,6 +91,7 @@ enum KeyType<Value> {
     I32(Vec<Action<Key<i32>, Value>>),
     I64(Vec<Action<Key<i64>, Value>>),
     I128(Vec<Action<Key<i128>, Value>>),
+    Usize(Vec<Action<Key<usize>, Value>>),
 }
 
 #[derive(Arbitrary, Debug)]
@@ -302,6 +304,7 @@ fn dispatch_by_key<'a, Value: Eq + Arbitrary<'a> + Debug + Copy>(actions: KeyTyp
         KeyType::I32(actions) => run(actions),
         KeyType::I64(actions) => run(actions),
         KeyType::I128(actions) => run(actions),
+        KeyType::Usize(actions) => run(actions),
     }
 }
 

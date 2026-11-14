@@ -333,7 +333,42 @@ fn integer_extrema() {
             tree.into_iter().next();
         } )*};
     }
-    check!(u8, u16, u32, u64, u128, i8, i16, i32, i64, i128);
+    check!(u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128);
+}
+
+#[test]
+fn usize_keys() {
+    let mid = 1usize << (usize::BITS - 1);
+    let keys: Vec<_> = (0..1000)
+        .chain(mid - 1000..mid + 1000)
+        .chain(usize::MAX - 1000..=usize::MAX)
+        .collect();
+    let mut shuffled = keys.clone();
+    shuffled.shuffle(&mut rand::rng());
+    let mut tree = BTree::new();
+    for key in shuffled {
+        tree.insert(key, key);
+    }
+    tree.check_invariants(true);
+    assert!(tree.iter().map(|(key, _)| key).eq(keys.iter().copied()));
+    for &key in &keys {
+        assert_eq!(tree.get(key), Some(&key));
+    }
+    for key in [0, 1, mid - 1, mid, mid + 1, usize::MAX - 1, usize::MAX] {
+        assert_eq!(
+            tree.range(..key).count(),
+            keys.partition_point(|&k| k < key)
+        );
+        assert_eq!(
+            tree.iter_from(Bound::Excluded(key)).count(),
+            keys.len() - keys.partition_point(|&k| k <= key),
+        );
+    }
+    for &key in &keys {
+        assert_eq!(tree.remove(key), Some(key));
+    }
+    tree.check_invariants(true);
+    assert!(tree.is_empty());
 }
 
 #[test]

@@ -99,6 +99,7 @@ impl_zero! {
     u32,
     u64,
     u128,
+    usize,
     i8,
     i16,
     i32,
@@ -203,6 +204,28 @@ pub(crate) trait SimdSearch: Int {
     }
 }
 
+cfg_select! {
+    target_pointer_width = "16" => {
+        type UsizeInt = u16;
+    }
+    target_pointer_width = "32" => {
+        type UsizeInt = u32;
+    }
+    target_pointer_width = "64" => {
+        type UsizeInt = u64;
+    }
+}
+
+impl SimdSearch for usize {
+    const SIMD_WIDTH: usize = UsizeInt::SIMD_WIDTH;
+    const BIAS: Self = UsizeInt::BIAS as Self;
+
+    #[inline]
+    unsafe fn simd_search(keys: *const Self, search: Self) -> usize {
+        unsafe { UsizeInt::simd_search(keys.cast(), search as UsizeInt) }
+    }
+}
+
 /// Helper function used by some implementations which generate bit masks with
 /// duplicate bits.
 ///
@@ -275,6 +298,13 @@ mod tests {
         test_search(
             |i| (i as u128).wrapping_add(SimdSearch::BIAS),
             u128::MAX.wrapping_add(SimdSearch::BIAS),
+        );
+    }
+    #[test]
+    fn test_search_usize() {
+        test_search(
+            |i| i.wrapping_add(SimdSearch::BIAS),
+            usize::MAX.wrapping_add(SimdSearch::BIAS),
         );
     }
     #[test]

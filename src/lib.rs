@@ -30,7 +30,7 @@ use crate::int::int_from_key;
 
 /// Trait which must be implemented for all keys inserted into a [`BTree`].
 ///
-/// This trait is implemented for fixed-width primitive integers.
+/// This trait is implemented for fixed-width primitive integers and `usize`.
 ///
 /// Custom key types can implement it by converting to and from an integer.
 ///
@@ -40,7 +40,7 @@ pub trait BTreeKey: Copy {
     /// Integer representation of this key.
     ///
     /// This must be `u8`, `u16`, `u32`, `u64`, `u128`, `i8`, `i16`, `i32`,
-    /// `i64`, or `i128`.
+    /// `i64`, `i128`, or `usize`.
     #[allow(private_bounds)]
     type Int: BTreeInteger;
 
