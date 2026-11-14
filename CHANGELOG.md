@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/Amanieu/brie-tree/compare/brie-tree-v0.2.0...brie-tree-v0.2.1) - 2026-11-14
+
 ### Added
 
 - Support `usize` keys, including `usize` as the integer representation of custom
